@@ -11,15 +11,22 @@ app.get("/", (req, res) => {
   res.send("API is running on Render!");
 });
 
-app.get("/hello", (req, res) => {
-  res.json({ message: "Hello from Render Node.js API!" });
-});
+app.get("api/stores", (req, res) => {
+  const filePath = path.join(__dirname, "data", "taiwan_stores_data.json");
 
-app.post("/add", (req, res) => {
-  const { name } = req.body;
-  res.json({
-    success: true,
-    received: name
+  fs.readFile(filePath, "utf8", (err, data) => {
+    if (err) {
+      console.error("Error reading json file:", err);
+      return res.status(500).json({ error: "Failed to read data file" });
+    }
+
+    try {
+      const jsonData = JSON.parse(data);
+      res.json(jsonData);
+    } catch (parseErr) {
+      console.error("JSON parse error:", parseErr);
+      res.status(500).json({ error: "Invalid JSON format" });
+    }
   });
 });
 
