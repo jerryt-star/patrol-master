@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import ReactDOM from 'react-dom';
+import { createRoot } from 'react-dom/client';
 
-const API_URL = import.meta.env.DEV 
-  ? '/api/stores' 
-  : 'https://patrol-master.onrender.com/api/stores';
+// 移除 import.meta.env.DEV 判斷式，直接使用外部 API 網址，以避免環境變數錯誤。
+const API_URL = 'https://patrol-master.onrender.com/api/stores';
+
 // 台灣中心點 (預設地圖位置)
 const TAIWAN_CENTER_LAT = 23.6978;
 const TAIWAN_CENTER_LNG = 120.9605;
@@ -37,11 +37,13 @@ const flattenStoreData = (nestedData) => {
 };
 
 // --- Leaflet 地圖整合元件 ---
-const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selectedStore, onStoreSelect }) => {
+// 新增 proximityRadius 屬性
+const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selectedStore, onStoreSelect, proximityRadius }) => {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const markersRef = useRef([]);
   const userMarkerRef = useRef(null); // 用於儲存使用者標記實例
+  const userCircleRef = useRef(null); // 用於儲存半徑圈實例
   const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
 
   // 1. 動態載入 Leaflet 資源 (CSS & JS)
@@ -85,7 +87,8 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     // 延遲刷新地圖，避免因容器大小未定而產生灰色區塊
     setTimeout(() => map.invalidateSize(), 100); 
 
-  }, [isLeafletLoaded]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLeafletLoaded]); // 移除 centerLat, centerLng, zoom 避免地圖不必要的重建
 
   // 3. 繪製標記 (Markers)
   useEffect(() => {
@@ -118,10 +121,11 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     const storeIcon = createIcon('#ef4444', 30); // 紅色 (店家)
     const selectedIcon = createIcon('#fbbf24', 40); // 黃色 (選中)
 
-    // A. 更新或標記使用者位置
+    // A. 更新或標記使用者位置和半徑圈
     if (userLocation) {
         const latLng = [userLocation.lat, userLocation.lng];
         
+        // 1. 更新使用者標記
         if (!userMarkerRef.current) {
              // 首次建立使用者標記
              userMarkerRef.current = L.marker(latLng, { icon: userIcon, zIndexOffset: 500 })
@@ -131,16 +135,67 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
         } else {
              // 更新使用者標記位置
              userMarkerRef.current.setLatLng(latLng);
-             // 如果地圖中心與使用者位置差異過大，則移動地圖
-             if (map.getCenter().distanceTo(latLng) > 500) { 
-                 map.flyTo(latLng, map.getZoom() < 14 ? 14 : map.getZoom()); // 平滑移動
-             }
+        }
+
+        // 2. 更新半徑圈 (將 km 轉為 meter)
+        const radiusInMeters = proximityRadius * 1000;
+        if (!userCircleRef.current) {
+            userCircleRef.current = L.circle(latLng, {
+                color: '#3b82f6',
+                fillColor: '#3b82f6',
+                fillOpacity: 0.1,
+                radius: radiusInMeters,
+                weight: 2,
+                interactive: false,
+                zIndexOffset: 400 // 在標記下方
+            }).addTo(map);
+        } else {
+            userCircleRef.current.setLatLng(latLng).setRadius(radiusInMeters);
+        }
+
+        // 3. 判斷是否需要移動地圖或調整縮放
+        let currentZoom = map.getZoom();
+        let targetZoom = currentZoom;
+        
+        // 如果半徑小於等於 1km，強制放大到 17 級 (100m 顯示效果較佳)
+        if (proximityRadius <= 1) {
+            targetZoom = 17;
+        } else if (currentZoom < 14) {
+            targetZoom = 14;
+        }
+
+        // 只有當地圖中心與使用者位置差異過大，或者縮放級別需要調整時才移動
+        if (map.getCenter().distanceTo(latLng) > 500 || targetZoom !== currentZoom) {
+            map.flyTo(latLng, targetZoom);
+        }
+
+    } else {
+        // 如果沒有 userLocation，移除使用者標記和半徑圈
+        if (userMarkerRef.current) {
+            userMarkerRef.current.remove();
+            userMarkerRef.current = null;
+        }
+        if (userCircleRef.current) {
+            userCircleRef.current.remove();
+            userCircleRef.current = null;
         }
     }
+
 
     // B. 標記店家 (限制數量避免性能問題)
     stores.slice(0, 50).forEach(store => {
       const isSelected = selectedStore?.id === store.id;
+
+      // 距離顯示邏輯 (地圖彈出視窗)
+      let distanceHtml = '';
+      if (store.distance !== undefined) {
+          const isMeters = store.distance < 1;
+          const value = isMeters ? (store.distance * 1000).toFixed(0) : store.distance.toFixed(1);
+          const unit = isMeters ? '公尺' : 'km';
+          distanceHtml = `<span class="text-green-600 font-bold">${value} ${unit}</span><br/>`;
+      }
+
+
       const marker = L.marker([store.lat, store.lng], { 
           icon: isSelected ? selectedIcon : storeIcon,
           zIndexOffset: isSelected ? 1000 : 0 // 選中的圖標層級最高
@@ -150,7 +205,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
         <div class="text-center">
             <strong class="text-gray-800 text-lg">${store.name}</strong><br/>
             <span class="text-xs text-gray-500">${store.city} ${store.area}</span><br/>
-            ${store.distance ? `<span class="text-green-600 font-bold">${store.distance.toFixed(2)} km</span><br/>` : ''}
+            ${distanceHtml}
             <button class="mt-2 px-2 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs rounded transition-colors" onclick="window.open('https://www.google.com/maps/dir/?api=1&destination=${store.lat},${store.lng}', '_blank')">導航</button>
         </div>
       `);
@@ -167,16 +222,16 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
       markersRef.current.push(marker);
     });
     
-    // 根據用戶操作設定地圖視圖
-    if (!selectedStore) {
-        const target = userLocation ? [userLocation.lat, userLocation.lng] : [centerLat, centerLng];
-        map.flyTo(target, userLocation ? 14 : zoom);
-    } else {
-        // 如果有選中的店家，地圖中心鎖定到店家
+    // C. 最終地圖視圖設定 (覆蓋原有的邏輯)
+    if (!userLocation && !selectedStore) {
+        // 靜態模式：居中台灣
+        map.flyTo([centerLat, centerLng], zoom);
+    } else if (selectedStore) {
+        // 鎖定選中的店家
         map.flyTo([selectedStore.lat, selectedStore.lng], 16);
-    }
+    } 
 
-  }, [isLeafletLoaded, userLocation, stores, selectedStore, onStoreSelect, centerLat, centerLng, zoom]);
+  }, [isLeafletLoaded, userLocation, stores, selectedStore, onStoreSelect, centerLat, centerLng, zoom, proximityRadius]); // 新增 proximityRadius 依賴
 
   return <div ref={mapRef} className="h-full w-full bg-gray-100 rounded-lg" />;
 };
@@ -196,8 +251,9 @@ const App = () => {
   
   // 定位狀態
   const [userLocation, setUserLocation] = useState(null);
-  const [isWatching, setIsWatching] = useState(false); // 追蹤是否正在監聽位置
-  const [proximityRadius, setProximityRadius] = useState(5); // 預設 5 公里半徑
+  const [isWatching, setIsWatching] = useState(true); // 預設開啟實時追蹤
+  // *** 變更：預設半徑調整為 100 公尺 (0.1 km) ***
+  const [proximityRadius, setProximityRadius] = useState(0.1); // 搜索半徑 (預設 100公尺)
   
   const watchIdRef = useRef(null); // 儲存 watchPosition 的 ID，用於清理
 
@@ -223,14 +279,15 @@ const App = () => {
 
   // 2. 啟動/停止位置追蹤
   const startWatchingPosition = useCallback(() => {
-    // 如果已經在追蹤，則忽略
-    if (isWatching) return;
+    // 檢查是否已經有追蹤 ID，若有則避免重複啟動
+    if (watchIdRef.current !== null) return;
 
     if (!navigator.geolocation) {
         setError('您的瀏覽器不支持地理位置追蹤。');
         return;
     }
 
+    // 啟動追蹤時，將 isWatching 設為 true (用於 UI 狀態)
     setIsWatching(true);
     setError('');
 
@@ -241,21 +298,19 @@ const App = () => {
         };
         // 每次成功獲取新位置，就更新狀態
         setUserLocation(newLocation);
-        // [移除] 不再自動清除城市/區域篩選，讓用戶可以結合兩種篩選方式
-        // setFilterCity('');
-        // setFilterArea('');
     };
 
     const errorHandler = (err) => {
         console.error('位置追蹤錯誤:', err);
         // 在追蹤失敗時顯示錯誤訊息
         setError('無法獲取您的位置，請檢查地理位置權限或網路。');
-        setIsWatching(false);
+        
         // 追蹤失敗，應停止追蹤
         if (watchIdRef.current) {
              navigator.geolocation.clearWatch(watchIdRef.current);
              watchIdRef.current = null;
         }
+        setIsWatching(false); // 追蹤失敗，將狀態設回 false
     };
 
     // 啟動持續監聽，這就是實時追蹤的關鍵
@@ -268,7 +323,8 @@ const App = () => {
             maximumAge: 0             // 不使用緩存，強制獲取最新位置
         }
     );
-  }, [isWatching]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // 移除 isWatching 依賴，使用 watchIdRef 進行防重複
 
   const stopWatchingPosition = useCallback(() => {
       if (watchIdRef.current !== null) {
@@ -278,16 +334,20 @@ const App = () => {
       setIsWatching(false);
       setUserLocation(null);
       setSelectedStore(null);
-  }, []);
+  }, []); // 無需依賴
 
   // 3. 組件掛載時自動開始追蹤，卸載時停止
   useEffect(() => {
-    // 預設開啟追蹤
+    // 預設開啟追蹤 (startWatchingPosition 會檢查 watchIdRef.current)
     startWatchingPosition(); 
     
     // 清理函數：在組件卸載時自動停止追蹤
     return () => {
-        stopWatchingPosition();
+        // 在組件卸載時執行 stopWatchingPosition 確保清理
+        if (watchIdRef.current !== null) {
+            navigator.geolocation.clearWatch(watchIdRef.current);
+            watchIdRef.current = null;
+        }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 僅在組件生命週期內執行一次
@@ -353,13 +413,15 @@ const App = () => {
                 stores={filteredStores}
                 selectedStore={selectedStore}
                 onStoreSelect={setSelectedStore}
+                proximityRadius={proximityRadius} // 傳遞半徑給地圖元件
             />
             
-            {/* 浮動控制面板 (定位按鈕) */}
-            <div className="absolute top-4 right-4 z-[1000] flex flex-col gap-2">
+            {/* 浮動控制面板 (定位按鈕) - 位於右下角 */}
+            <div className="absolute bottom-4 right-4 z-[1000] flex flex-col gap-2">
                 <button 
+                    // 根據 isWatching 狀態決定呼叫停止或啟動
                     onClick={isWatching ? stopWatchingPosition : startWatchingPosition}
-                    className={`p-3 rounded-full shadow-lg transition-all flex items-center justify-center ${
+                    className={`p-3 rounded-full shadow-xl transition-all flex items-center justify-center ${
                         isWatching 
                             ? 'bg-red-500 hover:bg-red-600 text-white' 
                             : 'bg-white hover:bg-gray-100 text-blue-600'
@@ -424,6 +486,10 @@ const App = () => {
                             onChange={(e) => setProximityRadius(Number(e.target.value))}
                             title="選擇附近店家搜索半徑"
                         >
+                            {/* *** 更改為 100 公尺選項 (0.1 km) 並設為預設 *** */}
+                            <option value="0.1">100 公尺 內</option> 
+                            <option value="0.2">200 公尺 內</option> 
+                            <option value="0.5">500 公尺 內</option>
                             <option value="1">1 km 內</option>
                             <option value="3">3 km 內</option>
                             <option value="5">5 km 內</option>
@@ -463,12 +529,19 @@ const App = () => {
                                 <h4 className="font-bold text-gray-800">{store.name}</h4>
                                 <p className="text-xs text-gray-500">{store.address}</p>
                             </div>
-                            {store.distance !== undefined && ( // 確保距離存在才顯示
-                                <div className="text-right flex-shrink-0 ml-4">
-                                    <span className="block text-lg font-bold text-green-600">{store.distance.toFixed(1)}</span>
-                                    <span className="text-[10px] text-gray-400">km</span>
-                                </div>
-                            )}
+                            {/* 根據距離自動切換顯示單位 (公尺/km) */}
+                            {store.distance !== undefined && (() => { 
+                                const isMeters = store.distance < 1;
+                                // 如果是公尺，四捨五入到整數；如果是 km，保留一位小數
+                                const value = isMeters ? (store.distance * 1000).toFixed(0) : store.distance.toFixed(1);
+                                const unit = isMeters ? '公尺' : 'km';
+                                return (
+                                    <div className="text-right flex-shrink-0 ml-4">
+                                        <span className="block text-lg font-bold text-green-600">{value}</span>
+                                        <span className="text-[10px] text-gray-400">{unit}</span>
+                                    </div>
+                                );
+                            })()}
                         </div>
                     ))
                 )}
@@ -478,5 +551,9 @@ const App = () => {
   );
 };
 
-// 繼續使用穩定的 React 17 風格渲染
-ReactDOM.render(<App />, document.getElementById('root'));
+// 使用 React 18 風格的 createRoot
+const rootElement = document.getElementById('root');
+if (rootElement) {
+    const root = createRoot(rootElement);
+    root.render(<App />);
+}
