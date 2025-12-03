@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>巡台神器</title>
+
+    <!-- 1. 載入 Tailwind CSS CDN (必須在 React 渲染前載入) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- 2. 應用程式專屬的自定義樣式 -->
+    <style>
+        /* 使用 Inter 字體以確保一致性和美觀 */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .store-list-container {
+            /* 讓列表在小螢幕上可以滾動，大螢幕上固定高度 */
+            max-height: 80vh; 
+            overflow-y: auto;
+        }
+        .store-item {
+            cursor: pointer;
+            transition: all 0.2s;
+            border-left: 4px solid transparent;
+        }
+        .store-item.selected {
+            border-left-color: #3b82f6; /* blue-500 */
+            background-color: #eff6ff; /* blue-50 */
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+        }
+        .store-item:hover:not(.selected) {
+            background-color: #f3f4f6; /* gray-100 */
+        }
+    </style>
+  </head>
+  <body>
+    <!-- React 應用程式的根節點 -->
+    <div id="root"></div>
+    <!-- 載入主要的 JavaScript 檔案 -->
+    <script type="module" src="/src/client/main.jsx"></script>
+  </body>
+</html>

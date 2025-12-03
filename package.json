@@ -1,18 +1,30 @@
 {
-  "name": "render-express-api",
+  "name": "claw-machine-map-app",
   "version": "1.0.0",
   "description": "Express API server for Taiwan stores data",
   "license": "MIT",
-  "main": "server.js",
-  "type": "commonjs",
+  "main": "src/server/server.js",
+  "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node src/server/server.js",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "node src/server/server.js",
+    "dev:client": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "engines": {
     "node": ">=14.0.0"
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.2.1",
+    "vite": "^5.3.3"
   }
 }
