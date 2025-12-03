@@ -37,7 +37,6 @@ const flattenStoreData = (nestedData) => {
 };
 
 // --- Leaflet 地圖整合元件 ---
-// 新增 proximityRadius 屬性
 const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selectedStore, onStoreSelect, proximityRadius }) => {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -101,8 +100,8 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     markersRef.current.forEach(marker => marker.remove());
     markersRef.current = [];
 
-    // 標記的 SVG 圖標生成器
-    const createIcon = (color, size = 25) => {
+    // 1. 娃娃機店標記的 SVG 圖標生成器 (地圖圖釘)
+    const createStoreIcon = (color, size = 25) => {
         const svg = `
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
@@ -117,9 +116,57 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
         });
     };
 
-    const userIcon = createIcon('#3b82f6', 35); // 藍色 (使用者)
-    const storeIcon = createIcon('#ef4444', 30); // 紅色 (店家)
-    const selectedIcon = createIcon('#fbbf24', 40); // 黃色 (選中)
+    // 2. 使用者標記的 SVG 圖標生成器 (火柴人 - Stick Figure)
+    const createUserIcon = (size = 30) => {
+        // 嵌入自定義 CSS 來實現上下移動的動畫效果 (解決閃爍問題)
+        const customStyles = `
+            <style>
+                @keyframes bobbing {
+                    0%, 100% { transform: translateY(0); }
+                    50% { transform: translateY(-4px); } /* 上移 4px */
+                }
+                /* 應用於包裹層，使其看起來像在移動 */
+                .walking-bob {
+                    animation: bobbing 1.5s ease-in-out infinite;
+                }
+            </style>
+        `;
+
+        // 簡化為火柴人 SVG，並模擬走路姿勢
+        const walkingStickFigureSvg = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <!-- 頭部 -->
+                <circle cx="12" cy="4" r="1.5" fill="#3b82f6" stroke="none"/> 
+                <!-- 身體 -->
+                <path d="M12 5.5v8"/> 
+                <!-- 手部 (模擬擺動) -->
+                <path d="M9 10l-2 2"/> 
+                <path d="M15 10l2 2"/> 
+                <!-- 腿部 (模擬走路) -->
+                <path d="M12 13.5l-3 5"/> 
+                <path d="M12 13.5l3 4"/> 
+            </svg>
+        `;
+
+        const walkingSvg = `
+        ${customStyles}
+        <div class="user-icon-pulse-wrapper walking-bob" style="width: ${size + 4}px; height: ${size + 4}px; display: flex; align-items: center; justify-content: center; background: white; border-radius: 50%; box-shadow: 0 0 5px rgba(0, 0, 0, 0.5); border: 2px solid #3b82f6;">
+            ${walkingStickFigureSvg}
+        </div>`;
+
+        return L.divIcon({
+            className: 'user-icon-container',
+            html: walkingSvg,
+            iconSize: [size + 10, size + 10], // 調整大小以包含邊框和陰影
+            iconAnchor: [(size + 10) / 2, size + 10], // 調整錨點使其底部貼合實際位置
+            popupAnchor: [0, -size]
+        });
+    };
+
+
+    const userIcon = createUserIcon(30); // 藍色 (使用者)
+    const storeIcon = createStoreIcon('#ef4444', 30); // 紅色 (店家)
+    const selectedIcon = createStoreIcon('#fbbf24', 40); // 黃色 (選中)
 
     // A. 更新或標記使用者位置和半徑圈
     if (userLocation) {
@@ -130,7 +177,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
              // 首次建立使用者標記
              userMarkerRef.current = L.marker(latLng, { icon: userIcon, zIndexOffset: 500 })
                 .addTo(map)
-                .bindPopup(`<b>📍 您的位置</b>`)
+                .bindPopup(`<b>🚶 您的位置</b>`)
                 .openPopup();
         } else {
              // 更新使用者標記位置
@@ -252,7 +299,7 @@ const App = () => {
   // 定位狀態
   const [userLocation, setUserLocation] = useState(null);
   const [isWatching, setIsWatching] = useState(true); // 預設開啟實時追蹤
-  // *** 變更：預設半徑調整為 100 公尺 (0.1 km) ***
+  // 預設半徑調整為 100 公尺 (0.1 km)
   const [proximityRadius, setProximityRadius] = useState(0.1); // 搜索半徑 (預設 100公尺)
   
   const watchIdRef = useRef(null); // 儲存 watchPosition 的 ID，用於清理
@@ -429,14 +476,14 @@ const App = () => {
                     title={isWatching ? "點擊停止實時追蹤" : "點擊開始實時追蹤"}
                 >
                     {isWatching ? (
-                        // 正在追蹤中的圖標 (脈衝波)
+                        // 正在追蹤中的圖標 (脈衝波) - 這裡保留脈衝圖標表示追蹤狀態
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 animate-pulse" viewBox="0 0 20 20" fill="currentColor">
                           <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM6.707 9.293a1 1 0 00-1.414 1.414l3 3a1 1 0 001.414 0l5-5a1 1 0 10-1.414-1.414L9 11.586l-2.293-2.293z" clipRule="evenodd" />
                         </svg>
                     ) : (
                         // 停止追蹤時的圖標
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 8 0 1111.314 0z" />
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
                         </svg>
                     )}
@@ -486,7 +533,6 @@ const App = () => {
                             onChange={(e) => setProximityRadius(Number(e.target.value))}
                             title="選擇附近店家搜索半徑"
                         >
-                            {/* *** 更改為 100 公尺選項 (0.1 km) 並設為預設 *** */}
                             <option value="0.1">100 公尺 內</option> 
                             <option value="0.2">200 公尺 內</option> 
                             <option value="0.5">500 公尺 內</option>
