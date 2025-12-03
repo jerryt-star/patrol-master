@@ -1,111 +1,191 @@
-import React, { useState, useEffect, useMemo } from 'react';
-// 修正：從 react-dom/client 具名匯入 createRoot，解決 TypeError 錯誤。
-import { createRoot } from 'react-dom/client'; 
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import ReactDOM from 'react-dom';
 
-// API 位址，用於從外部服務獲取數據
-// 開發環境使用本地 API（通過 Vite 代理），生產環境使用 Render
 const API_URL = import.meta.env.DEV 
   ? '/api/stores' 
   : 'https://patrol-master.onrender.com/api/stores';
-// 台灣中心點的經緯度 (用於初始地圖顯示)
+// 台灣中心點 (預設地圖位置)
 const TAIWAN_CENTER_LAT = 23.6978;
 const TAIWAN_CENTER_LNG = 120.9605;
 
-/**
- * Haversine 公式：計算地球上兩點之間的直線距離 (單位: km)
- * @param {number} lat1 點1 緯度
- * @param {number} lon1 點1 經度
- * @param {number} lat2 點2 緯度
- * @param {number} lon2 點2 經度
- * @returns {number} 兩點間的距離 (km)
- */
+// Haversine 公式：計算兩點之間的距離 (公里)
 const getDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371; // 地球半徑 (km)
+  const R = 6371; // 地球半徑 (公里)
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
-  const a = 
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c; // 距離 (km)
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1*(Math.PI/180)) * Math.cos(lat2*(Math.PI/180)) * Math.sin(dLon/2) * Math.sin(dLon/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
 
-// 輔助函數：將巢狀數據結構扁平化為單一的店家列表
+// 展平巢狀的店家資料結構
 const flattenStoreData = (nestedData) => {
   let stores = [];
   if (!nestedData) return [];
-  
-  // 遍歷所有縣市
   for (const cityKey in nestedData) {
-    if (nestedData.hasOwnProperty(cityKey)) {
-      const cityData = nestedData[cityKey];
-      
-      // 遍歷縣市下的所有區域
-      for (const areaKey in cityData) {
-        if (cityData.hasOwnProperty(areaKey) && cityData[areaKey] && Array.isArray(cityData[areaKey].data)) {
-          // 將區域內的店家數據加入總列表
-          stores = stores.concat(cityData[areaKey].data);
-        }
+    const cityData = nestedData[cityKey];
+    for (const areaKey in cityData) {
+      if (cityData[areaKey]?.data) {
+        stores = stores.concat(cityData[areaKey].data);
       }
     }
   }
-  
-  // 篩選出具有有效經緯度且名稱不為空值的店家
-  return stores.filter(store => 
-    store.lat && store.lng && typeof store.lat === 'number' && typeof store.lng === 'number' && store.name
-  ).map((store, index) => ({
-      ...store,
-      // 為每個店家創建一個唯一的 ID，如果原始數據沒有提供
-      id: store.id || `${store.city}-${store.area}-${index}`
+  // 過濾掉沒有座標的店家，並確保每個店家都有唯一的 ID
+  return stores.filter(s => s.lat && s.lng && s.name).map((s, i) => ({
+      ...s,
+      id: s.id || `${s.city}-${s.area}-${i}`
   }));
 };
 
-// 地圖組件：使用 Google Maps iframe 嵌入顯示選定的位置
-const StoreMap = ({ lat, lng, name, isLoading }) => {
-  const mapUrl = useMemo(() => {
-    // 構造 Google Maps 嵌入 URL
-    const marker = `${lat},${lng}`;
-    const center = `${lat},${lng}`;
-    const zoom = 15;
+// --- Leaflet 地圖整合元件 ---
+const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selectedStore, onStoreSelect }) => {
+  const mapRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markersRef = useRef([]);
+  const userMarkerRef = useRef(null); // 用於儲存使用者標記實例
+  const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
+
+  // 1. 動態載入 Leaflet 資源 (CSS & JS)
+  useEffect(() => {
+    if (window.L) {
+      setIsLeafletLoaded(true);
+      return;
+    }
+
+    // 載入 Leaflet CSS
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+    document.head.appendChild(link);
+
+    // 載入 Leaflet JavaScript
+    const script = document.createElement('script');
+    script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    script.async = true;
+    script.onload = () => setIsLeafletLoaded(true);
+    document.body.appendChild(script);
+  }, []);
+
+  // 2. 初始化地圖
+  useEffect(() => {
+    if (!isLeafletLoaded || !mapRef.current || mapInstanceRef.current) return;
+
+    const map = window.L.map(mapRef.current, {
+        zoomControl: false // 禁用預設縮放控制
+    }).setView([centerLat, centerLng], zoom);
     
-    return `https://maps.google.com/maps?q=${marker}&z=${zoom}&t=k&output=embed`;
-  }, [lat, lng]);
+    // 使用 OpenStreetMap 圖層
+    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center bg-gray-200 rounded-lg h-96 w-full text-gray-600">
-        正在載入地圖...
-      </div>
-    );
-  }
+    // 添加縮放控制在右上角
+    window.L.control.zoom({ position: 'topright' }).addTo(map);
 
-  return (
-    <div className="mt-6 border-4 border-blue-200 rounded-xl overflow-hidden shadow-lg">
-      <h3 className="text-xl font-semibold p-3 bg-blue-50 text-blue-800">
-        地圖定位：{name || '請選擇一個店家'}
-      </h3>
-      {lat && lng ? (
-        <iframe
-          width="100%"
-          height="400"
-          loading="lazy"
-          allowFullScreen
-          referrerPolicy="no-referrer-when-downgrade"
-          src={mapUrl}
-          title={`地圖顯示: ${name}`}
-        ></iframe>
-      ) : (
-        <div className="flex items-center justify-center bg-gray-100 h-96 w-full text-gray-500">
-          地圖尚未選擇定位，請從列表中選擇一家店鋪。
+    mapInstanceRef.current = map;
+    // 延遲刷新地圖，避免因容器大小未定而產生灰色區塊
+    setTimeout(() => map.invalidateSize(), 100); 
+
+  }, [isLeafletLoaded]);
+
+  // 3. 繪製標記 (Markers)
+  useEffect(() => {
+    if (!mapInstanceRef.current || !isLeafletLoaded) return;
+
+    const map = mapInstanceRef.current;
+    const L = window.L;
+
+    // 清除舊店家標記 (保留使用者標記)
+    markersRef.current.forEach(marker => marker.remove());
+    markersRef.current = [];
+
+    // 標記的 SVG 圖標生成器
+    const createIcon = (color, size = 25) => {
+        const svg = `
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
+          <circle cx="12" cy="10" r="3"></circle>
+        </svg>`;
+        return L.divIcon({
+            className: 'custom-icon',
+            html: svg,
+            iconSize: [size, size],
+            iconAnchor: [size / 2, size],
+            popupAnchor: [0, -size]
+        });
+    };
+
+    const userIcon = createIcon('#3b82f6', 35); // 藍色 (使用者)
+    const storeIcon = createIcon('#ef4444', 30); // 紅色 (店家)
+    const selectedIcon = createIcon('#fbbf24', 40); // 黃色 (選中)
+
+    // A. 更新或標記使用者位置
+    if (userLocation) {
+        const latLng = [userLocation.lat, userLocation.lng];
+        
+        if (!userMarkerRef.current) {
+             // 首次建立使用者標記
+             userMarkerRef.current = L.marker(latLng, { icon: userIcon, zIndexOffset: 500 })
+                .addTo(map)
+                .bindPopup(`<b>📍 您的位置</b>`)
+                .openPopup();
+        } else {
+             // 更新使用者標記位置
+             userMarkerRef.current.setLatLng(latLng);
+             // 如果地圖中心與使用者位置差異過大，則移動地圖
+             if (map.getCenter().distanceTo(latLng) > 500) { 
+                 map.flyTo(latLng, map.getZoom() < 14 ? 14 : map.getZoom()); // 平滑移動
+             }
+        }
+    }
+
+    // B. 標記店家 (限制數量避免性能問題)
+    stores.slice(0, 50).forEach(store => {
+      const isSelected = selectedStore?.id === store.id;
+      const marker = L.marker([store.lat, store.lng], { 
+          icon: isSelected ? selectedIcon : storeIcon,
+          zIndexOffset: isSelected ? 1000 : 0 // 選中的圖標層級最高
+      })
+      .addTo(map)
+      .bindPopup(`
+        <div class="text-center">
+            <strong class="text-gray-800 text-lg">${store.name}</strong><br/>
+            <span class="text-xs text-gray-500">${store.city} ${store.area}</span><br/>
+            ${store.distance ? `<span class="text-green-600 font-bold">${store.distance.toFixed(2)} km</span><br/>` : ''}
+            <button class="mt-2 px-2 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs rounded transition-colors" onclick="window.open('https://www.google.com/maps/dir/?api=1&destination=${store.lat},${store.lng}', '_blank')">導航</button>
         </div>
-      )}
-    </div>
-  );
+      `);
+
+      // 點擊標記時，更新選中的店家狀態
+      marker.on('click', () => {
+          onStoreSelect(store);
+      });
+
+      if (isSelected) {
+          marker.openPopup();
+      }
+
+      markersRef.current.push(marker);
+    });
+    
+    // 根據用戶操作設定地圖視圖
+    if (!selectedStore) {
+        const target = userLocation ? [userLocation.lat, userLocation.lng] : [centerLat, centerLng];
+        map.flyTo(target, userLocation ? 14 : zoom);
+    } else {
+        // 如果有選中的店家，地圖中心鎖定到店家
+        map.flyTo([selectedStore.lat, selectedStore.lng], 16);
+    }
+
+  }, [isLeafletLoaded, userLocation, stores, selectedStore, onStoreSelect, centerLat, centerLng, zoom]);
+
+  return <div ref={mapRef} className="h-full w-full bg-gray-100 rounded-lg" />;
 };
 
+// --- 主要 App 邏輯 ---
 
 const App = () => {
   const [allStores, setAllStores] = useState([]);
+  const [filteredStores, setFilteredStores] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedStore, setSelectedStore] = useState(null);
@@ -116,436 +196,287 @@ const App = () => {
   
   // 定位狀態
   const [userLocation, setUserLocation] = useState(null);
-  const [isLocating, setIsLocating] = useState(false);
-  // 半徑篩選 (km)
-  const [proximityRadius, setProximityRadius] = useState(10); 
-  const radiusOptions = [5, 10, 20, 50, 100];
-
-
-  // 獲取所有唯一的城市名稱，用於篩選下拉選單
-  const uniqueCities = useMemo(() => {
-    const cities = new Set(allStores.map(store => store.city).filter(Boolean));
-    return ['', ...Array.from(cities).sort()];
-  }, [allStores]);
-
-  // 獲取當前城市下的所有唯一區域名稱
-  const uniqueAreas = useMemo(() => {
-      if (!filterCity) return [''];
-      
-      const areas = new Set(
-          allStores
-              .filter(store => store.city === filterCity)
-              .map(store => store.area)
-              .filter(Boolean)
-      );
-      return ['', ...Array.from(areas).sort()];
-  }, [allStores, filterCity]);
-
-
-  // 根據篩選器/定位過濾並排序店家列表 (使用 useMemo 確保性能和穩定性)
-  const filteredStores = useMemo(() => {
-    // 總是從一個乾淨的副本開始
-    let stores = [...allStores];
-    
-    // 判斷是否為「定位模式」 (有定位資訊且未啟動城市篩選)
-    const isProximityMode = userLocation && !filterCity;
-
-    if (isProximityMode) {
-        const { lat: userLat, lng: userLng } = userLocation;
-
-        // 1. 計算所有店家的距離並加入 distance 屬性
-        stores = stores.map(store => {
-            // 由於 store.lat/lng 在 flattenStoreData 中已驗證為 number，這裡可以直接使用
-            const distance = getDistance(userLat, userLng, store.lat, store.lng);
-            return {
-                ...store,
-                distance: distance
-            };
-        });
-        
-        // 2. 篩選出在半徑內的店家
-        stores = stores.filter(store => store.distance <= proximityRadius);
-        
-        // 3. 依照距離排序 (最近的在前)
-        stores.sort((a, b) => a.distance - b.distance);
-        
-    } else {
-        // 非定位模式 (城市/區域篩選模式或無篩選)
-        
-        // 1. 應用城市篩選
-        if (filterCity) {
-            stores = stores.filter(store => store.city === filterCity);
-        }
-        
-        // 2. 應用區域篩選
-        if (filterArea) {
-            stores = stores.filter(store => store.area === filterArea);
-        }
-        
-        // 3. 移除 distance 屬性，確保在非定位模式下店鋪對象是乾淨的
-        stores = stores.map(store => {
-            const { distance, ...rest } = store;
-            return rest;
-        });
-    }
-
-    return stores;
-  }, [allStores, filterCity, filterArea, userLocation, proximityRadius]);
-
-
-  // 數據載入邏輯
-  useEffect(() => {
-    const loadStoreData = async () => {
-      let retries = 0;
-      const maxRetries = 5;
-      let success = false;
-      
-      while (retries < maxRetries && !success) {
-          try {
-            setLoading(true);
-            
-            const response = await fetch(API_URL);
-
-            if (!response.ok) {
-              throw new Error(`無法載入 API 數據，狀態碼: ${response.status}`);
-            }
-
-            const rawData = await response.json();
-            const flattenedData = flattenStoreData(rawData);
-            
-            setAllStores(flattenedData);
-            setError('');
-            success = true;
-
-            // 預設選擇第一個店家作為地圖中心點 (如果沒有自動定位的話)
-            setSelectedStore(prevStore => {
-                 if (flattenedData.length > 0 && !prevStore) {
-                     // 只有在還沒有任何定位資訊時才設定預設值
-                     if (!userLocation) { 
-                         return flattenedData[0];
-                     }
-                 }
-                 return prevStore;
-            });
-            
-          } catch (err) {
-            console.error(`載入和處理數據時發生錯誤 (嘗試 ${retries + 1}/${maxRetries}):`, err);
-            if (retries < maxRetries - 1) {
-                const delay = Math.pow(2, retries) * 1000;
-                // 實施指數退避 (Exponential Backoff)
-                await new Promise(resolve => setTimeout(resolve, delay)); 
-            } else {
-                setError(`數據處理失敗: ${err.message}. 請檢查 API (${API_URL}) 是否可用或格式是否正確。`);
-            }
-            retries++;
-          } finally {
-             if (success || retries === maxRetries) {
-                 setLoading(false);
-             }
-          }
-      }
-    };
-
-    loadStoreData();
-  }, [userLocation]); // 加上 userLocation 作為依賴，以便在定位成功後檢查是否需要設定預設店家
-
-
-  // 處理縣市變更，並重設區域篩選
-  const handleCityChange = (e) => {
-    const newCity = e.target.value;
-    setFilterCity(newCity);
-    setFilterArea(''); // 縣市變更時，重設區域篩選
-    setUserLocation(null); // 清除定位，改為使用篩選
-  };
-
-  // 處理區域變更
-  const handleAreaChange = (e) => {
-    setFilterArea(e.target.value);
-    setUserLocation(null); // 清除定位，改為使用篩選
-  };
+  const [isWatching, setIsWatching] = useState(false); // 追蹤是否正在監聽位置
+  const [proximityRadius, setProximityRadius] = useState(5); // 預設 5 公里半徑
   
-  // 處理店鋪點擊事件
-  const handleStoreClick = (store) => {
-    setSelectedStore(store);
-    const mapElement = document.getElementById('store-map-view');
-    if (mapElement) {
-      mapElement.scrollIntoView({ behavior: 'smooth' });
-    }
-  };
+  const watchIdRef = useRef(null); // 儲存 watchPosition 的 ID，用於清理
 
-  // 處理定位功能
-  const handleLocateMe = () => {
+  // 1. 載入資料
+  useEffect(() => {
+    const loadData = async () => {
+        try {
+            const res = await fetch(API_URL);
+            if (!res.ok) throw new Error('API Error');
+            const raw = await res.json();
+            const flattened = flattenStoreData(raw);
+            setAllStores(flattened);
+            setLoading(false);
+            setError('');
+        } catch (err) {
+            console.error(err);
+            setError('無法載入店家資料，請檢查 API 來源是否正常。');
+            setLoading(false);
+        }
+    };
+    loadData();
+  }, []);
+
+  // 2. 啟動/停止位置追蹤
+  const startWatchingPosition = useCallback(() => {
+    // 如果已經在追蹤，則忽略
+    if (isWatching) return;
+
     if (!navigator.geolocation) {
-        setError('您的瀏覽器不支持地理位置功能。');
+        setError('您的瀏覽器不支持地理位置追蹤。');
         return;
     }
 
-    setIsLocating(true);
+    setIsWatching(true);
     setError('');
 
-    navigator.geolocation.getCurrentPosition(
-        (position) => {
-            const newLocation = {
-                lat: position.coords.latitude,
-                lng: position.coords.longitude
-            };
-            setUserLocation(newLocation);
-            setIsLocating(false);
-            
-            // 啟用定位時，清除城市/區域篩選
-            setFilterCity('');
-            setFilterArea('');
-            
-            // 設定地圖中心為用戶位置
-            setSelectedStore({
-                id: 'user-location',
-                name: '您的當前位置',
-                lat: newLocation.lat,
-                lng: newLocation.longitude,
-                city: '定位',
-                area: '成功'
-            });
+    const successHandler = (position) => {
+        const newLocation = {
+            lat: position.coords.latitude,
+            lng: position.coords.longitude
+        };
+        // 每次成功獲取新位置，就更新狀態
+        setUserLocation(newLocation);
+        // [移除] 不再自動清除城市/區域篩選，讓用戶可以結合兩種篩選方式
+        // setFilterCity('');
+        // setFilterArea('');
+    };
 
-        },
-        (err) => {
-            console.error(err);
-            // 統一錯誤提示
-            let message = '無法獲取您的位置。';
-            if (err.code === err.PERMISSION_DENIED) {
-                 message += ' 請檢查瀏覽器是否允許存取地理位置。';
-            } else if (err.code === err.POSITION_UNAVAILABLE) {
-                 message += ' 位置資訊無法取得。';
-            } else if (err.code === err.TIMEOUT) {
-                 message += ' 請求超時。';
-            }
-            // 只有在沒有其他錯誤時才設定定位錯誤
-            setError(prevError => prevError.includes('API 數據') ? prevError : message);
-            setIsLocating(false);
-        },
-        { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+    const errorHandler = (err) => {
+        console.error('位置追蹤錯誤:', err);
+        // 在追蹤失敗時顯示錯誤訊息
+        setError('無法獲取您的位置，請檢查地理位置權限或網路。');
+        setIsWatching(false);
+        // 追蹤失敗，應停止追蹤
+        if (watchIdRef.current) {
+             navigator.geolocation.clearWatch(watchIdRef.current);
+             watchIdRef.current = null;
+        }
+    };
+
+    // 啟動持續監聽，這就是實時追蹤的關鍵
+    watchIdRef.current = navigator.geolocation.watchPosition(
+        successHandler,
+        errorHandler,
+        { 
+            enableHighAccuracy: true, // 啟用高精度模式
+            timeout: 10000,           // 等待位置的時間 (10秒)
+            maximumAge: 0             // 不使用緩存，強制獲取最新位置
+        }
     );
-  };
-  
-  // ============================== 新增：自動定位功能 ==============================
+  }, [isWatching]);
+
+  const stopWatchingPosition = useCallback(() => {
+      if (watchIdRef.current !== null) {
+          navigator.geolocation.clearWatch(watchIdRef.current);
+          watchIdRef.current = null;
+      }
+      setIsWatching(false);
+      setUserLocation(null);
+      setSelectedStore(null);
+  }, []);
+
+  // 3. 組件掛載時自動開始追蹤，卸載時停止
   useEffect(() => {
-    // 檢查瀏覽器是否支持地理位置功能
-    if (navigator.geolocation) {
-        // 在組件第一次渲染後自動觸發定位
-        handleLocateMe(); 
-    } else {
-        // 如果瀏覽器不支持，顯示錯誤，但不覆蓋 API 載入錯誤
-        console.error('瀏覽器不支持地理位置功能。');
-        setError(prevError => prevError || '您的瀏覽器不支持地理位置功能，無法自動定位。');
-    }
+    // 預設開啟追蹤
+    startWatchingPosition(); 
+    
+    // 清理函數：在組件卸載時自動停止追蹤
+    return () => {
+        stopWatchingPosition();
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // 僅在組件掛載時運行一次
-  // ==============================================================================
+  }, []); // 僅在組件生命週期內執行一次
+
+  // 4. 核心篩選與排序邏輯：當位置、半徑或靜態篩選條件改變時更新店家列表
+  useEffect(() => {
+    let results = [...allStores];
+
+    // 1. 靜態篩選 (縣市/區域) - 在任何模式下都生效
+    if (filterCity) results = results.filter(s => s.city === filterCity);
+    if (filterArea) results = results.filter(s => s.area === filterArea);
+
+    // 2. 實時追蹤模式下的距離計算、篩選和排序
+    if (userLocation && isWatching) {
+        results = results.map(store => ({
+            ...store,
+            // 計算距離
+            distance: getDistance(userLocation.lat, userLocation.lng, store.lat, store.lng)
+        }))
+        .filter(store => store.distance <= proximityRadius) // 只保留在設定半徑內的店家
+        .sort((a, b) => a.distance - b.distance); // 由近到遠排序
+    } else {
+        // 如果不在追蹤模式，確保距離資訊被清除
+         results = results.map(store => {
+            if (store.distance !== undefined) {
+                const { distance, ...rest } = store;
+                return rest;
+            }
+            return store;
+        });
+    }
+
+    setFilteredStores(results);
+  }, [allStores, filterCity, filterArea, userLocation, proximityRadius, isWatching]);
 
 
-  // 確定地圖中心點的經緯度
-  const mapCenterLat = selectedStore?.lat || userLocation?.lat || TAIWAN_CENTER_LAT;
-  const mapCenterLng = selectedStore?.lng || userLocation?.lng || TAIWAN_CENTER_LNG;
-  const mapCenterName = selectedStore?.name;
+  // 產生縣市和區域的下拉選單選項
+  const cities = useMemo(() => [...new Set(allStores.map(s => s.city))].filter(Boolean).sort(), [allStores]);
+  const areas = useMemo(() => {
+      if (!filterCity) return [];
+      return [...new Set(allStores.filter(s => s.city === filterCity).map(s => s.area))].filter(Boolean).sort();
+  }, [allStores, filterCity]);
 
 
-  if (error && !isLocating) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="max-w-xl w-full bg-white shadow-xl rounded-xl p-8 border-l-8 border-red-500">
-          <h1 className="text-2xl font-bold text-red-600 mb-4">載入或定位錯誤</h1>
-          <p className="text-gray-700">{error}</p>
-          <p className="mt-4 text-sm text-gray-500">
-            請確保 API 位址：<code>{API_URL}</code> 可正常連線，或檢查地理位置權限。
-          </p>
-        </div>
-      </div>
-    );
-  }
+  // 決定地圖中心點和縮放級別
+  const mapCenter = useMemo(() => {
+      return { 
+          lat: userLocation?.lat || TAIWAN_CENTER_LAT, 
+          lng: userLocation?.lng || TAIWAN_CENTER_LNG, 
+          zoom: userLocation ? 14 : 8 // 有位置時放大，否則顯示全台灣
+      };
+  }, [userLocation]);
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col lg:flex-row p-4 md:p-8 font-sans">
-      {/* 樣式已移至 index.html 的 <head> 中，這裡只保留結構和 Tailwind 類別 */}
-
-      {/* 左側：地圖和控制台 */}
-      <div className="w-full lg:w-3/5 lg:pr-4 mb-6 lg:mb-0">
-        <div className="bg-white shadow-xl rounded-xl p-6" id="store-map-view">
-          <h1 className="text-3xl font-extrabold text-gray-900 mb-4 border-b pb-2">
-            台灣娃娃機店家地圖
-          </h1>
-          <p className="text-sm text-gray-500 mb-4">
-            總計找到 <span className="font-bold text-blue-600">{allStores.length}</span> 個具有完整座標的店家資訊。
-          </p>
-          
-          <StoreMap 
-            lat={mapCenterLat}
-            lng={mapCenterLng}
-            name={mapCenterName}
-            isLoading={loading || isLocating}
-          />
-        </div>
-      </div>
-
-      {/* 右側：店家列表和篩選 */}
-      <div className="w-full lg:w-2/5">
-        <div className="bg-white shadow-xl rounded-xl p-6">
-          <h2 className="text-2xl font-bold text-gray-800 mb-4">店家列表與篩選</h2>
-          
-          {/* 定位按鈕 */}
-          <button
-              onClick={handleLocateMe}
-              disabled={isLocating || loading}
-              className={`w-full py-3 px-4 mb-4 rounded-lg font-bold transition-colors ${
-                  isLocating || loading
-                      ? 'bg-gray-400 text-gray-600 cursor-not-allowed'
-                      : 'bg-green-600 hover:bg-green-700 text-white shadow-md'
-              }`}
-          >
-              {isLocating ? (
-                  <span className="flex items-center justify-center">
-                      <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      正在偵測您的位置...
-                  </span>
-              ) : userLocation ? '重新偵測我的位置' : '偵測我的當前位置 (自動排序最近店家)'}
-          </button>
-          
-          {/* 篩選器容器 */}
-          <div className="mb-4 space-y-4 border-t pt-4">
-              
-              {/* 定位資訊與半徑篩選 */}
-              {userLocation && !filterCity ? (
-                  <div className="bg-green-50 p-3 rounded-lg border border-green-200">
-                      <p className="text-sm font-semibold text-green-800 mb-2">
-                          🎯 已定位！
-                          <span className="text-xs text-green-600 ml-2">(Lat: {userLocation.lat.toFixed(4)}, Lng: {userLocation.lng.toFixed(4)})</span>
-                      </p>
-                      
-                      {/* 半徑篩選器 */}
-                      <div>
-                          <label htmlFor="radius-filter" className="block text-sm font-medium text-gray-700 mb-1">
-                              顯示半徑內的店家 (km):
-                          </label>
-                          <select
-                              id="radius-filter"
-                              value={proximityRadius}
-                              onChange={(e) => setProximityRadius(Number(e.target.value))}
-                              className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-green-500 focus:border-green-500 sm:text-sm rounded-md shadow-sm"
-                          >
-                              {radiusOptions.map(radius => (
-                                  <option key={radius} value={radius}>
-                                      {radius} km
-                                  </option>
-                              ))}
-                          </select>
-                      </div>
-                  </div>
-              ) : (
-                  // 縣市篩選器
-                  <div className="grid grid-cols-2 gap-4">
-                      {/* 縣市篩選器 */}
-                      <div>
-                          <label htmlFor="city-filter" className="block text-sm font-medium text-gray-700 mb-1">
-                              縣市篩選:
-                          </label>
-                          <select
-                              id="city-filter"
-                              value={filterCity}
-                              onChange={handleCityChange}
-                              className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md shadow-sm"
-                          >
-                              {uniqueCities.map(city => (
-                                  <option key={city} value={city}>
-                                      {city || '所有縣市'}
-                                  </option>
-                              ))}
-                          </select>
-                      </div>
-
-                      {/* 區域篩選器 (鄉/鎮/區) - 只有選擇縣市後才顯示 */}
-                      {filterCity && (
-                          <div>
-                              <label htmlFor="area-filter" className="block text-sm font-medium text-gray-700 mb-1">
-                                  區域篩選:
-                              </label>
-                              <select
-                                  id="area-filter"
-                                  value={filterArea}
-                                  onChange={handleAreaChange}
-                                  className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md shadow-sm"
-                              >
-                                  {uniqueAreas.map(area => (
-                                      <option key={area} value={area}>
-                                          {area || '所有區域'}
-                                      </option>
-                                  ))}
-                              </select>
-                          </div>
-                      )}
-                  </div>
-              )}
-          </div>
-          
-          <p className="text-xs text-gray-500 mt-2">
-            目前顯示 <span className="font-bold">{filteredStores.length}</span> 個店家。
-            {userLocation && !filterCity && <span className="ml-1">（已按距離排序）</span>}
-          </p>
-
-          {loading ? (
-            <div className="flex justify-center items-center py-12 text-blue-600">
-              <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              數據載入中...
-            </div>
-          ) : (
-            <div className="store-list-container space-y-3 mt-4">
-              {filteredStores.length > 0 ? (
-                filteredStores.map((store) => (
-                  <div
-                    key={store.id}
-                    className={`store-item p-3 rounded-lg border border-gray-200 ${
-                      selectedStore?.id === store.id ? 'selected' : 'bg-white'
+    <div className="flex flex-col h-screen bg-gray-50 font-sans">
+        {/* 地圖區 */}
+        <div className="flex-1 relative z-0 shadow-lg">
+            <LeafletMap 
+                centerLat={mapCenter.lat}
+                centerLng={mapCenter.lng}
+                zoom={mapCenter.zoom}
+                userLocation={userLocation}
+                stores={filteredStores}
+                selectedStore={selectedStore}
+                onStoreSelect={setSelectedStore}
+            />
+            
+            {/* 浮動控制面板 (定位按鈕) */}
+            <div className="absolute top-4 right-4 z-[1000] flex flex-col gap-2">
+                <button 
+                    onClick={isWatching ? stopWatchingPosition : startWatchingPosition}
+                    className={`p-3 rounded-full shadow-lg transition-all flex items-center justify-center ${
+                        isWatching 
+                            ? 'bg-red-500 hover:bg-red-600 text-white' 
+                            : 'bg-white hover:bg-gray-100 text-blue-600'
                     }`}
-                    onClick={() => handleStoreClick(store)}
-                    title={`點擊在地圖上查看 ${store.name}`}
-                  >
-                    <p className="font-semibold text-gray-900 truncate">
-                      {store.name}
-                    </p>
-                    <p className="text-sm text-gray-500">
-                      {store.city} {store.area}
-                      {/* 顯示距離，如果它存在 (代表已定位) */}
-                      {store.distance !== undefined && (
-                        <span className="ml-2 font-bold text-green-600">
-                          ({store.distance.toFixed(2)} km)
-                        </span>
-                      )}
-                    </p>
-                    <p className="text-xs text-gray-400 truncate">
-                      地址: {store.address}
-                    </p>
-                  </div>
-                ))
-              ) : (
-                <div className="text-center py-10 text-gray-500">
-                  <p>未找到符合條件的店家，請調整篩選條件。</p>
-                </div>
-              )}
+                    title={isWatching ? "點擊停止實時追蹤" : "點擊開始實時追蹤"}
+                >
+                    {isWatching ? (
+                        // 正在追蹤中的圖標 (脈衝波)
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 animate-pulse" viewBox="0 0 20 20" fill="currentColor">
+                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM6.707 9.293a1 1 0 00-1.414 1.414l3 3a1 1 0 001.414 0l5-5a1 1 0 10-1.414-1.414L9 11.586l-2.293-2.293z" clipRule="evenodd" />
+                        </svg>
+                    ) : (
+                        // 停止追蹤時的圖標
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                    )}
+                </button>
             </div>
-          )}
+            {error && (
+                <div className="absolute top-4 left-4 z-[1000] bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded shadow-lg text-sm">
+                    {error}
+                </div>
+            )}
         </div>
-      </div>
+
+        {/* 列表區 */}
+        <div className="h-2/5 bg-white shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] z-10 flex flex-col">
+            {/* 控制列 */}
+            <div className="p-4 border-b bg-gray-50 flex flex-wrap gap-2 items-center">
+                <div className="flex gap-2 flex-grow">
+                    {/* 縣市篩選器 (現在總是顯示) */}
+                    <select 
+                        className="p-2 border rounded text-sm"
+                        value={filterCity}
+                        onChange={(e) => { setFilterCity(e.target.value); setFilterArea(''); }}
+                        title="選擇縣市"
+                    >
+                        <option value="">所有縣市</option>
+                        {cities.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                    
+                    {/* 區域篩選器 (現在總是顯示) */}
+                    {filterCity && (
+                        <select 
+                            className="p-2 border rounded text-sm"
+                            value={filterArea}
+                            onChange={(e) => setFilterArea(e.target.value)}
+                            title="選擇區域"
+                        >
+                            <option value="">所有區域</option>
+                            {areas.map(a => <option key={a} value={a}>{a}</option>)}
+                        </select>
+                    )}
+
+                    {/* 半徑篩選器 (僅在定位模式下顯示) */}
+                    {isWatching && userLocation && (
+                        <select
+                            className="p-2 border border-green-300 bg-green-50 rounded text-sm text-green-800 font-medium"
+                            value={proximityRadius}
+                            onChange={(e) => setProximityRadius(Number(e.target.value))}
+                            title="選擇附近店家搜索半徑"
+                        >
+                            <option value="1">1 km 內</option>
+                            <option value="3">3 km 內</option>
+                            <option value="5">5 km 內</option>
+                            <option value="10">10 km 內</option>
+                            <option value="20">20 km 內</option>
+                        </select>
+                    )}
+                </div>
+                
+                <div className="text-sm text-gray-500 ml-auto">
+                    模式：
+                    <span className={`font-bold ml-1 ${isWatching && userLocation ? 'text-red-600' : 'text-blue-600'}`}>
+                        {isWatching && userLocation ? '實時追蹤中' : '靜態篩選中'}
+                    </span>
+                    &middot; 顯示: <strong>{filteredStores.length}</strong> 間
+                </div>
+            </div>
+
+            {/* 店家列表 */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-100">
+                {loading ? (
+                    <div className="text-center py-10 text-gray-500">店家資料載入中...</div>
+                ) : filteredStores.length === 0 ? (
+                    <div className="text-center py-10 text-gray-500">
+                        {isWatching && userLocation ? '附近沒有找到店家，試試擴大範圍或停止追蹤切換篩選模式。' : '未找到符合條件的店家。'}
+                    </div>
+                ) : (
+                    filteredStores.map(store => (
+                        <div 
+                            key={store.id}
+                            onClick={() => setSelectedStore(store)}
+                            className={`p-3 bg-white rounded-lg shadow-sm border-l-4 cursor-pointer transition-all hover:shadow-md flex justify-between items-center
+                                ${selectedStore?.id === store.id ? 'border-blue-500 ring-1 ring-blue-200' : 'border-transparent'}
+                            `}
+                        >
+                            <div>
+                                <h4 className="font-bold text-gray-800">{store.name}</h4>
+                                <p className="text-xs text-gray-500">{store.address}</p>
+                            </div>
+                            {store.distance !== undefined && ( // 確保距離存在才顯示
+                                <div className="text-right flex-shrink-0 ml-4">
+                                    <span className="block text-lg font-bold text-green-600">{store.distance.toFixed(1)}</span>
+                                    <span className="text-[10px] text-gray-400">km</span>
+                                </div>
+                            )}
+                        </div>
+                    ))
+                )}
+            </div>
+        </div>
     </div>
   );
 };
 
-// 將整個應用程式掛載到 DOM
-// 修正：使用具名匯入的 createRoot
-createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+// 繼續使用穩定的 React 17 風格渲染
+ReactDOM.render(<App />, document.getElementById('root'));
