@@ -11,7 +11,7 @@ app.get("/", (req, res) => {
   res.send("API is running on Render!");
 });
 
-app.get("api/stores", (req, res) => {
+app.get("/api/stores", (req, res) => {
   const filePath = path.join(__dirname, "data", "taiwan_stores_data.json");
 
   fs.readFile(filePath, "utf8", (err, data) => {
