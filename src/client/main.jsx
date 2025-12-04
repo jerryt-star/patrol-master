@@ -72,6 +72,21 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     script.async = true;
     script.onload = () => setIsLeafletLoaded(true);
     document.body.appendChild(script);
+
+    // 添加自定義 CSS 來處理使用者圖標的動畫
+    const style = document.createElement('style');
+    style.innerHTML = `
+        @keyframes bobbing {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-4px); } /* 上移 4px */
+        }
+        .walking-bob {
+            animation: bobbing 1.5s ease-in-out infinite;
+        }
+    `;
+    document.head.appendChild(style);
+
+
   }, []);
 
   // 2. 初始化地圖
@@ -99,7 +114,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLeafletLoaded]); 
 
-  // 3. 處理容器大小變化 (列表收合/展開)
+  // 3. 處理容器大小變化 (地圖容器高度受列表收合影響)
   useEffect(() => {
     if (!mapInstanceRef.current || !isLeafletLoaded) return;
 
@@ -108,11 +123,13 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     // 每次地圖容器大小變化時，強制 Leaflet 重新計算尺寸
     const resizeObserver = new ResizeObserver(() => {
         if (mapInstanceRef.current) {
-            mapInstanceRef.current.invalidateSize({ pan: false });
+            // 只需要重新計算尺寸，不需要平移 (pan)
+            mapInstanceRef.current.invalidateSize({ pan: false }); 
         }
     });
 
     if (mapRef.current) {
+        // 觀察 mapRef 的大小變化
         resizeObserver.observe(mapRef.current);
     }
     
@@ -185,35 +202,20 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
 
     // 2. 使用者標記的 SVG 圖標生成器
     const createUserIcon = (size = 30) => {
-        const customStyles = `
-            <style>
-                @keyframes bobbing {
-                    0%, 100% { transform: translateY(0); }
-                    50% { transform: translateY(-4px); } /* 上移 4px */
-                }
-                .walking-bob {
-                    animation: bobbing 1.5s ease-in-out infinite;
-                }
-            </style>
-        `;
-
+        // 身體圖案
         const walkingStickFigureSvg = `
             <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <!-- 頭部 -->
                 <circle cx="12" cy="4" r="1.5" fill="#3b82f6" stroke="none"/> 
-                <!-- 身體 -->
                 <path d="M12 5.5v8"/> 
-                <!-- 手部 (模擬擺動) -->
                 <path d="M9 10l-2 2"/> 
                 <path d="M15 10l2 2"/> 
-                <!-- 腿部 (模擬走路) -->
                 <path d="M12 13.5l-3 5"/> 
                 <path d="M12 13.5l3 4"/> 
             </svg>
         `;
-
+        
+        // 移除內嵌 style 標籤，改用 class="walking-bob"
         const walkingSvg = `
-        ${customStyles}
         <div class="user-icon-pulse-wrapper walking-bob" style="width: ${size + 4}px; height: ${size + 4}px; display: flex; align-items: center; justify-content: center; background: white; border-radius: 50%; box-shadow: 0 0 5px rgba(0, 0, 0, 0.5); border: 2px solid #3b82f6;">
             ${walkingStickFigureSvg}
         </div>`;
@@ -336,6 +338,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
 
   }, [isLeafletLoaded, userLocation, stores, selectedStore, onStoreSelect, centerLat, centerLng, proximityRadius]); 
 
+  // 將 height-full 確保地圖元件完全填滿父層容器
   return <div ref={mapRef} className="h-full w-full bg-gray-100 rounded-lg" />;
 };
 
@@ -359,7 +362,8 @@ const App = () => {
   // 預設搜索半徑為 0.1 km (100 公尺)
   const [proximityRadius, setProximityRadius] = useState(0.1); 
   
-  // 控制列表是否展開 (預設收合列表)
+  // *** 恢復收合功能 ***
+  // 預設為收合狀態 (false)
   const [isListOpen, setIsListOpen] = useState(false); 
 
   const watchIdRef = useRef(null); // 儲存 watchPosition 的 ID，用於清理
@@ -368,6 +372,7 @@ const App = () => {
   useEffect(() => {
     const loadData = async () => {
         try {
+            // 使用提供的 API URL
             const res = await fetch(API_URL);
             if (!res.ok) throw new Error('API Error');
             const raw = await res.json();
@@ -575,8 +580,9 @@ const App = () => {
   }, [userLocation, filteredStores]); 
 
   return (
+    // 使用 flex-col 和 h-screen 確保內容垂直排列並佔滿整個視窗高度
     <div className="flex flex-col h-screen bg-gray-50 font-sans">
-        {/* 地圖區 - 使用 flex-grow 佔滿剩餘空間 */}
+        {/* 地圖區 - 使用 flex-grow 佔滿剩餘空間 (這是實現可收合的關鍵) */}
         <div className="flex-grow relative z-0 shadow-lg">
             <LeafletMap 
                 centerLat={mapCenter.lat}
@@ -590,6 +596,7 @@ const App = () => {
             />
             
             {/* 浮動控制面板 (定位按鈕) - 位於右下角 */}
+            {/* 為了避免被收合的列表遮擋，這裡使用相對位置 (bottom-4) */}
             <div className="absolute bottom-4 right-4 z-[1000] flex flex-col gap-2">
                 <button 
                     onClick={isWatching ? stopWatchingPosition : startWatchingPosition}
@@ -606,7 +613,7 @@ const App = () => {
                         </svg>
                     ) : (
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 8 0 1111.314 0z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
                         </svg>
                     )}
@@ -620,17 +627,18 @@ const App = () => {
         </div>
 
         {/* 列表區 - 根據 isListOpen 動態調整高度 */}
-        {/* 修正：在移動裝置上，將展開高度從 h-[60vh] 調整為 h-[50vh]，以避免內容被瀏覽器 UI 遮擋 */}
         <div 
-            className={`bg-white shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] z-10 flex flex-col transition-all duration-300 ease-in-out ${isListOpen ? 'h-[50vh]' : 'h-14'}`}
+            className={`bg-white shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] z-10 flex flex-col transition-all duration-300 ease-in-out flex-shrink-0 ${
+                isListOpen ? 'h-[40vh]' : 'h-14' // 展開時佔 40% 螢幕高度，收合時 h-14
+            }`}
         >
-            {/* 1. Header (總是可見，用於收合/展開) */}
+            {/* 1. Header (可點擊收合/展開) */}
             <div 
                 className="flex-shrink-0 p-3 border-b bg-gray-50 flex justify-between items-center cursor-pointer" 
                 onClick={() => setIsListOpen(!isListOpen)}
             >
                 <h3 className="font-bold text-lg text-gray-700">
-                    {isListOpen ? '收合店家列表' : '展開店家列表 (點擊展開)'}
+                    {isListOpen ? '收合店家列表' : `展開店家列表 (顯示 ${filteredStores.length} 間)`}
                 </h3>
                 {/* Toggle button/icon */}
                 <button 
@@ -682,7 +690,6 @@ const App = () => {
                                 onChange={(e) => setProximityRadius(Number(e.target.value))}
                                 title="選擇附近店家搜索半徑"
                             >
-                                {/* 調整選項順序，讓 100 公尺預設顯示 */}
                                 <option value="0.1">100 公尺 內</option> 
                                 <option value="0.2">200 公尺 內</option> 
                                 <option value="0.5">500 公尺 內</option>
@@ -695,7 +702,7 @@ const App = () => {
                         )}
                     </div>
                     
-                    <div className="text-sm text-gray-500 ml-auto">
+                    <div className="text-sm text-gray-500 ml-auto flex-shrink-0">
                         模式：
                         <span className={`font-bold ml-1 ${isWatching && userLocation ? 'text-red-600' : 'text-blue-600'}`}>
                             {isWatching && userLocation ? '實時追蹤中' : '靜態篩選中'}
