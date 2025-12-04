@@ -547,7 +547,7 @@ const App = () => {
           return { lat: userLocation.lat, lng: userLocation.lng, zoom: MAX_ZOOM };
       }
 
-      // 2. 靜態模式：如果篩選後有店家，則計算這些店家的中心點 (修正重點！)
+      // 2. 靜態模式：如果篩選後有店家，則計算這些店家的中心點
       if (filteredStores.length > 0) {
           let totalLat = 0;
           let totalLng = 0;
@@ -572,7 +572,6 @@ const App = () => {
           lng: DEFAULT_STATIC_LNG, 
           zoom: DEFAULT_STATIC_ZOOM 
       };
-      // 關鍵：將 filteredStores 加入依賴項，確保篩選後會重新計算中心點
   }, [userLocation, filteredStores]); 
 
   return (
@@ -621,8 +620,9 @@ const App = () => {
         </div>
 
         {/* 列表區 - 根據 isListOpen 動態調整高度 */}
+        {/* 修正：在移動裝置上，將展開高度從 h-[60vh] 調整為 h-[50vh]，以避免內容被瀏覽器 UI 遮擋 */}
         <div 
-            className={`bg-white shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] z-10 flex flex-col transition-all duration-300 ease-in-out ${isListOpen ? 'h-[60vh]' : 'h-14'}`}
+            className={`bg-white shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] z-10 flex flex-col transition-all duration-300 ease-in-out ${isListOpen ? 'h-[50vh]' : 'h-14'}`}
         >
             {/* 1. Header (總是可見，用於收合/展開) */}
             <div 
