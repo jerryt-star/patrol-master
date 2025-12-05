@@ -13,7 +13,7 @@ const DEFAULT_AREA = '信義區';
 // *** 地圖最大縮放級別 (用於選中店家或實時追蹤) ***
 const MAX_ZOOM = 18;
 // 靜態篩選模式的預設縮放級別 (聚焦在城市/區域)
-const DEFAULT_STATIC_ZOOM = 13; // 將預設縮放調低一點，以便看到整個區域
+const DEFAULT_STATIC_ZOOM = 17;
 
 
 // Haversine 公式：計算兩點之間的距離 (公里)
@@ -45,61 +45,75 @@ const flattenStoreData = (nestedData) => {
 };
 
 // --- Leaflet 地圖整合元件 ---
-const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selectedStore, onStoreSelect, proximityRadius }) => {
-  const mapRef = useRef(null);
-  const mapInstanceRef = useRef(null);
+const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selectedStore, onStoreSelect, proximityRadius, mapControlRef, isWatching, userHeading }) => {
+  const mapRef = useRef(null); 
+  const mapInstanceRef = useRef(null); 
   const markersRef = useRef([]);
   const userMarkerRef = useRef(null); 
   const userCircleRef = useRef(null); 
   const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
+  
+  // 暴露給父元件呼叫的方法：強制地圖重新計算尺寸
+  const forceMapResize = useCallback(() => {
+    if (mapInstanceRef.current && window.L) {
+        window.requestAnimationFrame(() => {
+            // 使用 { pan: false } 避免在 resize 時地圖亂跑
+            mapInstanceRef.current.invalidateSize({ pan: false });
+        });
+    }
+  }, []);
 
-  // 1. 動態載入 Leaflet 資源 (CSS & JS)
+  // 1. 將 forceMapResize 綁定到傳入的 ref
+  useEffect(() => {
+      if (mapControlRef) {
+          mapControlRef.current = { forceMapResize };
+      }
+  }, [mapControlRef, forceMapResize]); 
+
+  // 2. 動態載入 Leaflet 資源 (CSS & JS)
   useEffect(() => {
     if (window.L) {
       setIsLeafletLoaded(true);
       return;
     }
 
-    // 載入 Leaflet CSS
     const link = document.createElement('link');
     link.rel = 'stylesheet';
     link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
     document.head.appendChild(link);
 
-    // 載入 Leaflet JavaScript
     const script = document.createElement('script');
     script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
     script.async = true;
     script.onload = () => setIsLeafletLoaded(true);
     document.body.appendChild(script);
 
-    // 添加自定義 CSS 來處理使用者圖標的動畫 (維持原有的 bobbing 動畫)
+    // 添加自定義 CSS (動畫) - *** 顏色調整：加深發光效果的藍色 ***
     const style = document.createElement('style');
     style.innerHTML = `
         @keyframes bobbing {
             0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-4px); } /* 上移 4px */
+            50% { transform: translateY(-4px); } 
         }
         .walking-bob {
             animation: bobbing 1.5s ease-in-out infinite;
         }
+        /* 新增：靜態模式下的發光效果 (顏色加深) */
+        @keyframes static-glow {
+            0% { box-shadow: 0 0 0 0 rgba(0, 68, 255, 0.6); }
+            50% { box-shadow: 0 0 0 10px rgba(0, 68, 255, 0.2); }
+            100% { box-shadow: 0 0 0 0 rgba(0, 68, 255, 0); }
+        }
+        .user-icon-static-glow {
+            animation: static-glow 2s infinite;
+            border-color: #0044FF !important; /* 強制邊框變深藍 */
+        }
     `;
     document.head.appendChild(style);
 
-    // 清理函數：移除 Leaflet 資源
-    return () => {
-        document.head.removeChild(link);
-        document.body.removeChild(script);
-        document.head.removeChild(style);
-        // 如果地圖實例存在，則銷毀它
-        if (mapInstanceRef.current) {
-            mapInstanceRef.current.remove();
-            mapInstanceRef.current = null;
-        }
-    };
   }, []);
 
-  // 2. 初始化地圖
+  // 3. 初始化地圖
   useEffect(() => {
     if (!isLeafletLoaded || !mapRef.current || mapInstanceRef.current) return;
 
@@ -116,34 +130,23 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     window.L.control.zoom({ position: 'topright' }).addTo(map);
 
     mapInstanceRef.current = map;
-    // 延遲刷新地圖，避免因容器大小未定而產生灰色區塊
+    
+    // 初始化時強制刷新一次
     setTimeout(() => map.invalidateSize(), 100); 
 
-  // 只有在 Leaflet 載入和 ref 改變時運行初始化
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLeafletLoaded, mapRef]); 
-
-  // 3. 處理容器大小變化 (使用 ResizeObserver)
-  useEffect(() => {
-    if (!mapInstanceRef.current || !isLeafletLoaded) return;
-
-    const resizeObserver = new ResizeObserver(() => {
-        if (mapInstanceRef.current) {
-            mapInstanceRef.current.invalidateSize({ pan: false }); 
-        }
-    });
-
-    if (mapRef.current) {
-        resizeObserver.observe(mapRef.current);
-    }
-    
-    return () => {
-        resizeObserver.disconnect();
-    };
-
   }, [isLeafletLoaded]); 
 
-  // 4. 繪製和更新標記/定位邏輯
+  // 4. 視圖控制 (flyTo)
+  useEffect(() => {
+      if (!mapInstanceRef.current || !isLeafletLoaded) return;
+      
+      const map = mapInstanceRef.current;
+      // 使用 flyTo 平滑移動到指定中心點
+      map.flyTo([centerLat, centerLng], zoom);
+  }, [centerLat, centerLng, zoom, isLeafletLoaded]);
+
+  // 5. 繪製和更新標記/定位邏輯
   useEffect(() => {
     if (!mapInstanceRef.current || !isLeafletLoaded) return;
 
@@ -153,123 +156,132 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     // 清除舊店家標記 
     markersRef.current.forEach(marker => marker.remove());
     markersRef.current = [];
-    
-    // --- 圖標生成器 ---
 
-    // 娃娃機店標記的 SVG 圖標生成器
+    // 店家圖標生成器 (顏色增強)
     const createStoreIcon = (color, size = 30, text = '', isSelected) => {
-        // 店家名稱標籤
-        const textHtml = text ? `
-            <div style="
-                position: absolute; 
-                top: -${size * 0.9}px; 
-                left: 50%; 
-                transform: translateX(-50%);
-                padding: 4px 8px; 
-                background: ${color}; 
-                color: white; 
-                font-size: 14px; 
-                font-weight: 700; 
-                border-radius: 9999px; 
-                white-space: nowrap;
-                box-shadow: 0 1px 4px rgba(0,0,0,0.4);
-                line-height: 1;
-                z-index: 10;
-            ">
-                ${text}
-            </div>
-        ` : '';
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>`;
+
+        let textHtml = '';
+        if (text) {
+             // 確保文字背景顏色也同步變深
+             textHtml = `<div style="position: absolute; top: -${size * 0.9}px; left: 50%; transform: translateX(-50%); padding: 4px 8px; background: ${color}; color: white; font-size: 14px; font-weight: 700; border-radius: 9999px; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,0.5); line-height: 1; z-index: 10;">${text}</div>`;
+        }
         
-        // 標記的 SVG
-        const svg = `
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
-          <circle cx="12" cy="10" r="3"></circle>
-        </svg>`;
+        const htmlContent = textHtml + svg; 
 
-        const htmlContent = `
-            ${textHtml}
-            ${svg}
-        `;
-
-        const markerSize = isSelected ? 40 : size;
+        const markerSize = isSelected ? 45 : size; // 選中時稍微再大一點
         
         return L.divIcon({
             className: 'custom-store-icon',
-            html: htmlContent,
+            html: htmlContent, 
             iconSize: [markerSize, markerSize],
             iconAnchor: [markerSize / 2, markerSize],
             popupAnchor: [0, -markerSize]
         });
     };
 
-    // 使用者標記的 SVG 圖標生成器
-    const createUserIcon = (size = 30) => {
-        const walkingStickFigureSvg = `
-            <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="4" r="1.5" fill="#3b82f6" stroke="none"/> 
-                <path d="M12 5.5v8"/> 
-                <path d="M9 10l-2 2"/> 
-                <path d="M15 10l2 2"/> 
-                <path d="M12 13.5l-3 5"/> 
-                <path d="M12 13.5l3 4"/> 
+    // 使用者圖標生成器 (顏色增強：深藍與深灰)
+    const createUserIcon = (size = 30, heading, isTracking) => {
+        // 箭頭形狀 SVG
+        // *** 顏色調整：使用更鮮豔的 #0044FF (深藍) 和 #555555 (深灰) ***
+        const arrowColor = isTracking ? '#0044FF' : '#555555';
+        const arrowSvg = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="${arrowColor}" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2 L22 22 L12 18 L2 22 Z" />
             </svg>
         `;
         
-        const walkingSvg = `
-        <div class="user-icon-pulse-wrapper walking-bob" style="width: ${size + 4}px; height: ${size + 4}px; display: flex; align-items: center; justify-content: center; background: white; border-radius: 50%; box-shadow: 0 0 5px rgba(0, 0, 0, 0.5); border: 2px solid #3b82f6;">
-            ${walkingStickFigureSvg}
-        </div>`;
+        const rotationStyle = (heading !== null && heading !== undefined)
+            ? `transform: rotate(${heading}deg);` 
+            : ''; 
+
+        // 靜態模式下的發光 class
+        const glowClass = !isTracking ? 'user-icon-static-glow' : '';
+            
+        // 外層容器
+        const userHtml = `
+            <div class="user-icon-div ${glowClass}" style="
+                width: ${size + 12}px; 
+                height: ${size + 12}px; 
+                display: flex; 
+                align-items: center; 
+                justify-content: center; 
+                background: white; 
+                border-radius: 50%; 
+                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5); 
+                border: 3px solid ${arrowColor}; /* 加粗邊框 */
+                transition: transform 0.3s ease-out;
+            ">
+                <div style="
+                    width: ${size}px; 
+                    height: ${size}px; 
+                    transition: transform 0.3s ease-out; 
+                    ${rotationStyle}
+                ">
+                    ${arrowSvg}
+                </div>
+            </div>`;
 
         return L.divIcon({
             className: 'user-icon-container',
-            html: walkingSvg,
-            iconSize: [size + 10, size + 10], 
-            iconAnchor: [(size + 10) / 2, size + 10], 
-            popupAnchor: [0, -size]
+            html: userHtml,
+            iconSize: [size + 12, size + 12], 
+            iconAnchor: [(size + 12) / 2, (size + 12) / 2], // 中心錨點
+            popupAnchor: [0, -size/2]
         });
     };
 
-    const userIcon = createUserIcon(30); 
 
     // A. 更新或標記使用者位置和半徑圈
-    const isTracking = !!userLocation;
-    if (isTracking) {
+    if (userLocation) {
         const latLng = [userLocation.lat, userLocation.lng];
-        const radiusInMeters = proximityRadius * 1000;
         
-        // 1. 更新使用者標記
+        // 1. 產生帶有方向的圖標
+        const currentIcon = createUserIcon(30, userHeading, isWatching);
+        
+        // 建立 Popup 內容
+        let popupContent = `<b>🚶 您的位置</b>`;
+        if (userHeading !== null && userHeading !== undefined) {
+            popupContent += `<br/>方向: ${userHeading.toFixed(0)}°`;
+        }
+        if (!isWatching) {
+            popupContent += `<br/><span class="text-xs text-gray-500">(靜態定位)</span>`;
+        }
+
+        // 更新 Marker
         if (!userMarkerRef.current) {
-             userMarkerRef.current = L.marker(latLng, { icon: userIcon, zIndexOffset: 500 })
+             userMarkerRef.current = L.marker(latLng, { icon: currentIcon, zIndexOffset: 500 })
                 .addTo(map)
-                .bindPopup(`<b>🚶 您的位置</b>`)
-                .openPopup();
+                .bindPopup(popupContent);
         } else {
-             userMarkerRef.current.setLatLng(latLng);
+             userMarkerRef.current.setLatLng(latLng).setIcon(currentIcon).setPopupContent(popupContent);
         }
 
-        // 2. 更新半徑圈 
-        if (!userCircleRef.current) {
-            userCircleRef.current = L.circle(latLng, {
-                color: '#3b82f6',
-                fillColor: '#3b82f6',
-                fillOpacity: 0.1,
-                radius: radiusInMeters,
-                weight: 2,
-                interactive: false,
-                zIndexOffset: 400 
-            }).addTo(map);
+        // 2. 更新半徑圈 (僅在追蹤模式下顯示)
+        if (isWatching) {
+            const radiusInMeters = proximityRadius * 1000;
+            if (!userCircleRef.current) {
+                userCircleRef.current = L.circle(latLng, {
+                    color: '#0044FF', // *** 顏色加深 ***
+                    fillColor: '#0044FF',
+                    fillOpacity: 0.15, // 稍微增加不透明度
+                    radius: radiusInMeters,
+                    weight: 2,
+                    interactive: false,
+                    zIndexOffset: 400 
+                }).addTo(map);
+            } else {
+                userCircleRef.current.setLatLng(latLng).setRadius(radiusInMeters);
+            }
         } else {
-            userCircleRef.current.setLatLng(latLng).setRadius(radiusInMeters);
-        }
-
-        // 只有在未選中店家時，才根據追蹤邏輯移動視圖
-        if (!selectedStore) {
-            map.flyTo(latLng, MAX_ZOOM);
+             // 靜態模式：移除半徑圈
+             if (userCircleRef.current) {
+                userCircleRef.current.remove();
+                userCircleRef.current = null;
+            }
         }
 
     } else {
-        // 如果沒有 userLocation，移除使用者標記和半徑圈
         if (userMarkerRef.current) {
             userMarkerRef.current.remove();
             userMarkerRef.current = null;
@@ -281,7 +293,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     }
 
 
-    // B. 標記店家 (限制數量避免性能問題)
+    // B. 標記店家 
     stores.slice(0, 50).forEach(store => {
       const isSelected = selectedStore?.id === store.id;
 
@@ -293,9 +305,8 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
           distanceHtml = `<span class="text-green-600 font-bold">${value} ${unit}</span><br/>`;
       }
 
-      // 根據是否選中，決定標記顏色、大小和是否顯示名稱
-      const iconColor = isSelected ? '#fbbf24' : '#ef4444'; 
-      // 未選中時顯示名稱，選中時不顯示 (名稱會被 PopUp 遮住)
+      // *** 顏色調整 ***
+      const iconColor = isSelected ? '#FFAA00' : '#FF0000'; // 選中:深金黃, 未選中:正紅
       const iconText = isSelected ? '' : store.name; 
       
       const icon = createStoreIcon(iconColor, 30, iconText, isSelected); 
@@ -314,7 +325,6 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
         </div>
       `);
 
-      // 點擊標記時，更新選中的店家狀態
       marker.on('click', () => {
           onStoreSelect(store);
       });
@@ -326,17 +336,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
       markersRef.current.push(marker);
     });
     
-    // C. 最終地圖視圖設定 (覆蓋原有的邏輯)
-    if (selectedStore) {
-        // 鎖定選中的店家
-        map.flyTo([selectedStore.lat, selectedStore.lng], MAX_ZOOM);
-    } else if (!isTracking) {
-        // 靜態模式：居中到篩選結果的中心點或預設中心
-        map.flyTo([centerLat, centerLng], DEFAULT_STATIC_ZOOM);
-    } 
-    // 追蹤模式已經在 (A) 區塊處理了 flyTo
-
-  }, [isLeafletLoaded, userLocation, stores, selectedStore, onStoreSelect, centerLat, centerLng, proximityRadius]); 
+  }, [isLeafletLoaded, userLocation, userHeading, isWatching, stores, selectedStore, onStoreSelect, proximityRadius]); 
 
   // 將 height-full 確保地圖元件完全填滿父層容器
   return <div ref={mapRef} id="leaflet-map-container" className="h-full w-full bg-gray-100 rounded-lg" />;
@@ -352,20 +352,37 @@ const App = () => {
   const [selectedStore, setSelectedStore] = useState(null);
   
   // 篩選狀態
-  const [filterCity, setFilterCity] = useState('');
-  const [filterArea, setFilterArea] = useState('');
+  const [filterCity, setFilterCity] = useState(DEFAULT_CITY);
+  const [filterArea, setFilterArea] = useState(DEFAULT_AREA);
   
   // 定位狀態
   const [userLocation, setUserLocation] = useState(null);
-  const [isWatching, setIsWatching] = useState(true); 
+  const [userHeading, setUserHeading] = useState(null); // 使用者方向
+  const [isWatching, setIsWatching] = useState(false); // 預設：靜態模式 (Static Mode)
   const [proximityRadius, setProximityRadius] = useState(0.1); 
   
+  // 強制置中狀態
+  const [isRecenterForced, setIsRecenterForced] = useState(false);
+
   // 列表收合狀態
-  const [isListOpen, setIsListOpen] = useState(true); // 預設改為展開，使用者體驗較佳
+  const [isListOpen, setIsListOpen] = useState(false); 
 
   const watchIdRef = useRef(null); 
+  const mapControlRef = useRef(null); 
 
-  // 1. 載入資料
+  // 處理列表展開/收合，並強制地圖刷新尺寸
+  const handleListToggle = () => {
+    const newState = !isListOpen;
+    setIsListOpen(newState);
+    setTimeout(() => {
+        if (mapControlRef.current && mapControlRef.current.forceMapResize) {
+            mapControlRef.current.forceMapResize();
+        }
+    }, 350); 
+  };
+
+
+  // 1. 載入資料 
   useEffect(() => {
     const loadData = async () => {
         try {
@@ -377,7 +394,7 @@ const App = () => {
             setLoading(false);
             setError('');
         } catch (err) {
-            console.error('API 載入錯誤:', err);
+            console.error('Data loading error:', err);
             setError('無法載入店家資料，請檢查 API 來源是否正常。');
             setLoading(false);
         }
@@ -385,8 +402,8 @@ const App = () => {
     loadData();
   }, []);
   
-  // 找出距離最近的店家所屬的縣市和區域
-  const findNearestStoreLocation = useCallback((location) => {
+  // 找出距離最近的店家所屬的縣市和區域 
+  const findLocationBasedOnStores = useCallback((location) => {
     if (!location || allStores.length === 0) {
         return { city: DEFAULT_CITY, area: DEFAULT_AREA }; 
     }
@@ -407,7 +424,7 @@ const App = () => {
     return nearestStore ? { city: nearestStore.city, area: nearestStore.area } : { city: DEFAULT_CITY, area: DEFAULT_AREA }; 
   }, [allStores]);
 
-  // 2. 啟動位置追蹤
+  // 2. 啟動位置追蹤 
   const startWatchingPosition = useCallback(() => {
     if (watchIdRef.current !== null) return;
 
@@ -416,12 +433,11 @@ const App = () => {
         return;
     }
 
-    // 啟動追蹤時，將靜態篩選重置，並清除選中的店家
     setFilterCity(''); 
     setFilterArea('');
-    setSelectedStore(null);
     setIsWatching(true);
     setError('');
+    setIsRecenterForced(false); 
 
     const successHandler = (position) => {
         const newLocation = {
@@ -429,6 +445,11 @@ const App = () => {
             lng: position.coords.longitude
         };
         setUserLocation(newLocation);
+        
+        // 更新方向 (heading)
+        if (position.coords.heading !== null && !isNaN(position.coords.heading)) {
+            setUserHeading(position.coords.heading);
+        }
     };
 
     const errorHandler = (err) => {
@@ -440,10 +461,8 @@ const App = () => {
              watchIdRef.current = null;
         }
         setIsWatching(false); 
-        // 定位失敗時，自動切換到靜態模式並使用預設城市
-        const { city, area } = findNearestStoreLocation(null);
-        setFilterCity(city);
-        setFilterArea(area);
+        setFilterCity(DEFAULT_CITY);
+        setFilterArea(DEFAULT_AREA);
     };
 
     watchIdRef.current = navigator.geolocation.watchPosition(
@@ -455,9 +474,10 @@ const App = () => {
             maximumAge: 0             
         }
     );
-  }, [findNearestStoreLocation]); 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); 
 
-  // 3. 停止位置追蹤 (切換到靜態模式)
+  // 3. 停止位置追蹤 
   const stopWatchingPosition = useCallback(() => {
       if (watchIdRef.current !== null) {
           navigator.geolocation.clearWatch(watchIdRef.current);
@@ -465,38 +485,60 @@ const App = () => {
       }
       setIsWatching(false);
 
-      // 根據最後位置找到最近的城市和區域來設定篩選器
-      const { city, area } = findNearestStoreLocation(userLocation);
+      const { city, area } = findLocationBasedOnStores(userLocation);
       
       setFilterCity(city);
       setFilterArea(area);
 
-      // 清除 userLocation，讓地圖切換回靜態模式，並清除選中的店家
-      setUserLocation(null); 
+      // 保留 userLocation 以便靜態模式顯示
       setSelectedStore(null);
-  }, [findNearestStoreLocation, userLocation]); 
+      
+      // 修正重點：停止追蹤時，如果還找得到 userLocation，強制置中，不讓地圖跳到區域中心
+      if (userLocation) {
+          setIsRecenterForced(true);
+      } else {
+          setIsRecenterForced(false);
+      }
+      
+      setUserHeading(null); 
+  }, [findLocationBasedOnStores, userLocation]); 
 
-  // 4. 組件掛載時自動開始追蹤 (如果預設開啟)
+  // 4. 組件掛載時獲取一次位置 (靜態模式也需要位置)
   useEffect(() => {
-    if (isWatching) {
-        startWatchingPosition(); 
-    }
-    
-    // 清理函數
-    return () => {
-        if (watchIdRef.current !== null) {
-            navigator.geolocation.clearWatch(watchIdRef.current);
-            watchIdRef.current = null;
-        }
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); 
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const loc = {
+                    lat: position.coords.latitude,
+                    lng: position.coords.longitude
+                };
+                setUserLocation(loc);
+                
+                // 初始一次性獲取方向 (如果可用)
+                 if (position.coords.heading !== null && !isNaN(position.coords.heading)) {
+                    setUserHeading(position.coords.heading);
+                }
 
-  // 5. 核心篩選與排序邏輯
+                // 初始設定：如果不在追蹤模式，將篩選器切換到使用者目前位置
+                if (!isWatching && allStores.length > 0) {
+                    const { city, area } = findLocationBasedOnStores(loc);
+                    setFilterCity(city);
+                    setFilterArea(area);
+                    // 初始載入成功後，自動強制置中
+                    setIsRecenterForced(true);
+                }
+            },
+            (err) => console.warn("Initial geolocation failed:", err),
+            { enableHighAccuracy: true, timeout: 5000 }
+        );
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allStores]); 
+
+  // 5. 核心篩選與排序邏輯 
   useEffect(() => {
     let results = [...allStores];
 
-    // 實時追蹤模式
     if (userLocation && isWatching) {
         results = allStores.map(store => ({
             ...store,
@@ -506,11 +548,9 @@ const App = () => {
         .sort((a, b) => a.distance - b.distance); 
         
     } else {
-        // 靜態模式
         if (filterCity) results = results.filter(s => s.city === filterCity);
         if (filterArea) results = results.filter(s => s.area === filterArea);
         
-        // 靜態模式：確保距離資訊被清除
          results = results.map(store => {
             const { distance, ...rest } = store;
             return rest;
@@ -521,26 +561,60 @@ const App = () => {
   }, [allStores, filterCity, filterArea, userLocation, proximityRadius, isWatching]);
 
 
-  // 產生縣市和區域的下拉選單選項
+  // 產生縣市和區域的下拉選單選項 
   const cities = useMemo(() => [...new Set(allStores.map(s => s.city))].filter(Boolean).sort(), [allStores]);
   const areas = useMemo(() => {
       if (!filterCity) return [];
       return [...new Set(allStores.filter(s => s.city === filterCity).map(s => s.area))].filter(Boolean).sort();
   }, [allStores, filterCity]);
 
-
-  // 決定地圖中心點和縮放級別
-  const mapCenter = useMemo(() => {
-      // 1. 追蹤模式：使用使用者位置
+  // *** 手動置中處理 ***
+  const handleRecenter = () => {
       if (userLocation) {
+          setIsRecenterForced(true);
+          setSelectedStore(null); 
+      }
+  };
+
+  // 處理篩選器變更 (自動取消強制置中)
+  const handleCityChange = (e) => {
+    setFilterCity(e.target.value);
+    setFilterArea('');
+    setIsRecenterForced(false);
+  };
+
+  const handleAreaChange = (e) => {
+    setFilterArea(e.target.value);
+    setIsRecenterForced(false);
+  };
+  
+  // 處理選取店家 (自動取消強制置中)
+  const handleStoreSelect = (store) => {
+      setSelectedStore(store);
+      setIsRecenterForced(false);
+  }
+
+  // *** 決定地圖中心點和縮放級別 (已更新置中優先級) ***
+  const mapCenter = useMemo(() => {
+      // 1. 強制置中 (按鈕 / 初始載入 / 停止追蹤瞬間) - 最高優先級
+      if (isRecenterForced && userLocation) {
+          return { lat: userLocation.lat, lng: userLocation.lng, zoom: DEFAULT_STATIC_ZOOM }; // 使用 17
+      }
+
+      // 2. 選中店家
+      if (selectedStore) {
+          return { lat: selectedStore.lat, lng: selectedStore.lng, zoom: MAX_ZOOM };
+      }
+
+      // 3. 追蹤模式
+      if (userLocation && isWatching) {
           return { lat: userLocation.lat, lng: userLocation.lng, zoom: MAX_ZOOM };
       }
 
-      // 2. 靜態模式：計算篩選後店家的中心點
+      // 4. 靜態模式：計算篩選後店家的中心點
       if (filteredStores.length > 0) {
           let totalLat = 0;
           let totalLng = 0;
-          
           filteredStores.forEach(store => {
               totalLat += store.lat;
               totalLng += store.lng;
@@ -554,33 +628,58 @@ const App = () => {
               zoom: DEFAULT_STATIC_ZOOM 
           };
       }
+      
+      // 5. 靜態模式：無店家但有位置 -> 置中於使用者 (作為回退)
+      if (userLocation) {
+          return { 
+              lat: userLocation.lat, 
+              lng: userLocation.lng, 
+              zoom: DEFAULT_STATIC_ZOOM 
+          };
+      }
 
-      // 3. 最終回退：使用預設值
+      // 6. 最終回退
       return { 
           lat: DEFAULT_STATIC_LAT, 
           lng: DEFAULT_STATIC_LNG, 
           zoom: DEFAULT_STATIC_ZOOM 
       };
-  }, [userLocation, filteredStores]); 
+  }, [userLocation, isWatching, filteredStores, selectedStore, isRecenterForced]); 
 
   return (
-    // 使用 h-screen 確保內容垂直排列並佔滿整個視窗高度
+    // 根容器：使用 h-screen 配合 flex-col
     <div className="flex flex-col h-screen bg-gray-50 font-sans">
-        {/* 地圖區 - 使用 flex-grow 佔滿剩餘空間 */}
-        <div className="flex-grow relative z-0 shadow-lg min-h-[50vh]">
+        {/* 地圖區：使用 flex-grow 佔滿所有剩餘空間 */}
+        <div className="flex-grow relative z-0 shadow-lg">
             <LeafletMap 
                 centerLat={mapCenter.lat}
                 centerLng={mapCenter.lng}
                 zoom={mapCenter.zoom}
                 userLocation={userLocation}
+                userHeading={userHeading} // 傳遞方向資訊給地圖元件
+                isWatching={isWatching}    // 傳遞是否在追蹤模式
                 stores={filteredStores}
                 selectedStore={selectedStore}
-                onStoreSelect={setSelectedStore}
+                onStoreSelect={handleStoreSelect} // 使用新的 handleStoreSelect
                 proximityRadius={proximityRadius} 
+                mapControlRef={mapControlRef} 
             />
             
             {/* 浮動控制面板 (定位按鈕) - 位於右下角 */}
             <div className="absolute bottom-4 right-4 z-[1000] flex flex-col gap-2">
+                {/* 置中按鈕 (僅在有使用者位置時顯示) */}
+                {userLocation && (
+                    <button 
+                        onClick={handleRecenter} 
+                        className={`p-3 rounded-full shadow-xl transition-all flex justify-center items-center ${isRecenterForced ? 'bg-blue-100 text-blue-700 border-2 border-blue-500' : 'bg-white text-blue-600 hover:bg-gray-100'}`}
+                        title="置中到我的位置"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064" />
+                        </svg>
+                    </button>
+                )}
+
                 <button 
                     onClick={isWatching ? stopWatchingPosition : startWatchingPosition}
                     className={`p-3 rounded-full shadow-xl transition-all flex items-center justify-center ${
@@ -590,7 +689,6 @@ const App = () => {
                     } text-lg`}
                     title={isWatching ? "點擊停止實時追蹤" : "點擊開始實時追蹤"}
                 >
-                    {/* 更新圖標以更清晰表達 "追蹤中" / "停止追蹤" */}
                     {isWatching ? (
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                           <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -608,18 +706,23 @@ const App = () => {
                     {error}
                 </div>
             )}
+            {userLocation && (
+                <div className="absolute top-4 left-4 z-[1000] bg-white text-gray-700 px-3 py-1 rounded shadow-lg text-xs font-medium border border-gray-200">
+                    {isWatching ? <><span className="text-red-500">• 實時追蹤</span> | 方向: {userHeading !== null ? `${userHeading.toFixed(0)}°` : '未知'}</> : <span className="text-blue-500">• 靜態模式</span>}
+                </div>
+            )}
         </div>
 
         {/* 列表區 - 根據 isListOpen 動態調整高度 */}
         <div 
             className={`bg-white shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] z-10 flex flex-col transition-all duration-300 ease-in-out flex-shrink-0
-                ${isListOpen ? 'h-[50vh] md:h-[40vh]' : 'h-14'}
+                ${isListOpen ? 'h-[40vh]' : 'h-14'}
             `}
         >
             {/* 1. Header (可點擊收合/展開) */}
             <div 
                 className="flex-shrink-0 p-3 border-b bg-gray-50 flex justify-between items-center cursor-pointer select-none" 
-                onClick={() => setIsListOpen(!isListOpen)}
+                onClick={handleListToggle}
             >
                 <h3 className="font-bold text-lg text-gray-700">
                     {isWatching && userLocation ? '附近店家 (依距離排序)' : '靜態店家列表'}
@@ -647,7 +750,7 @@ const App = () => {
                         <select 
                             className="p-2 border rounded text-sm w-full md:w-auto"
                             value={filterCity}
-                            onChange={(e) => { setFilterCity(e.target.value); setFilterArea(''); }}
+                            onChange={handleCityChange}
                             title="選擇縣市"
                             disabled={isWatching}
                         >
@@ -660,7 +763,7 @@ const App = () => {
                             <select 
                                 className="p-2 border rounded text-sm w-full md:w-auto"
                                 value={filterArea}
-                                onChange={(e) => setFilterArea(e.target.value)}
+                                onChange={handleAreaChange}
                                 title="選擇區域"
                                 disabled={isWatching}
                             >
@@ -669,7 +772,7 @@ const App = () => {
                             </select>
                         )}
 
-                        {/* 半徑篩選器 (僅在追蹤模式下顯示) */}
+                        {/* 半徑篩選器 (僅在定位模式下顯示) */}
                         {isWatching && userLocation && (
                             <select
                                 className="p-2 border border-green-300 bg-green-50 rounded text-sm text-green-800 font-medium w-full md:w-auto"
@@ -684,15 +787,9 @@ const App = () => {
                                 <option value="3">3 km 內</option>
                                 <option value="5">5 km 內</option>
                                 <option value="10">10 km 內</option>
+                                <option value="20">20 km 內</option>
                             </select>
                         )}
-                    </div>
-                    
-                    <div className="text-sm text-gray-500 flex-shrink-0 mt-2 md:mt-0">
-                        模式：
-                        <span className={`font-bold ml-1 ${isWatching && userLocation ? 'text-red-600' : 'text-blue-600'}`}>
-                            {isWatching && userLocation ? '實時追蹤中' : '靜態篩選中'}
-                        </span>
                     </div>
                 </div>
 
@@ -704,7 +801,7 @@ const App = () => {
                               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                             </svg>
-                            店家資料載入中...
+                            店家資料與初始定位載入中...
                         </div>
                     ) : filteredStores.length === 0 ? (
                         <div className="text-center py-10 text-gray-500 p-4 border border-dashed border-gray-300 rounded-lg">
@@ -712,17 +809,14 @@ const App = () => {
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
                             <p className="mt-2 text-sm font-medium">
-                                {isWatching && userLocation ? '附近沒有找到店家，試試擴大範圍。' : '未找到符合條件的店家。'}
+                                {isWatching && userLocation ? `在 ${proximityRadius * 1000} 公尺內沒有找到店家。` : '未找到符合條件的店家。'}
                             </p>
-                            {(!isWatching && filterCity === '' && filterArea === '') && (
-                                <p className="mt-1 text-xs text-red-500">請先選擇縣市和區域，或點擊右下角按鈕開啟定位追蹤。</p>
-                            )}
                         </div>
                     ) : (
                         filteredStores.map(store => (
                             <div 
                                 key={store.id}
-                                onClick={() => setSelectedStore(store)}
+                                onClick={() => handleStoreSelect(store)}
                                 className={`p-4 bg-white rounded-lg shadow-sm border-l-4 cursor-pointer transition-all hover:shadow-md flex justify-between items-center
                                     ${selectedStore?.id === store.id ? 'border-blue-500 ring-2 ring-blue-300' : 'border-gray-200 hover:border-blue-300'}
                                 `}
@@ -753,9 +847,5 @@ const App = () => {
   );
 };
 
-// 使用 React 18 風格的 createRoot
 const rootElement = document.getElementById('root');
-if (rootElement) {
-    const root = createRoot(rootElement);
-    root.render(<App />);
-}
+if (rootElement) { const root = createRoot(rootElement); root.render(<App />); }
