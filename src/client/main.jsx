@@ -155,8 +155,10 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     const createUserIcon = (size = 30, heading, isTracking) => {
         const arrowColor = isTracking ? '#0044FF' : '#555555';
         const arrowSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="${arrowColor}" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L12 2 L22 22 L12 18 L2 22 Z" /></svg>`;
-        // 修正：+180 度
-        const rotationStyle = (heading !== null && heading !== undefined) ? `transform: rotate(${heading + 180}deg);` : ''; 
+        
+        // *** 修正：移除 +180，直接使用 heading，讓箭頭朝向前方 ***
+        const rotationStyle = (heading !== null && heading !== undefined) ? `transform: rotate(${heading}deg);` : ''; 
+        
         const glowClass = !isTracking ? 'user-icon-static-glow' : '';
         const userHtml = `<div class="user-icon-div ${glowClass}" style="width: ${size + 12}px; height: ${size + 12}px; display: flex; align-items: center; justify-content: center; background: white; border-radius: 50%; box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5); border: 3px solid ${arrowColor}; transition: transform 0.1s linear; ${rotationStyle}">${arrowSvg}</div>`;
         return L.divIcon({ className: 'user-icon-container', html: userHtml, iconSize: [size + 12, size + 12], iconAnchor: [(size + 12) / 2, (size + 12) / 2], popupAnchor: [0, -size/2] });
@@ -238,9 +240,11 @@ const App = () => {
   const [error, setError] = useState('');
   const [selectedStore, setSelectedStore] = useState(null);
   
+  // 篩選狀態
   const [filterCity, setFilterCity] = useState(DEFAULT_CITY);
   const [filterArea, setFilterArea] = useState(DEFAULT_AREA);
   
+  // 定位狀態
   const [userLocation, setUserLocation] = useState(null);
   const [userHeading, setUserHeading] = useState(null); 
   const [isWatching, setIsWatching] = useState(false); // 預設：靜態模式
@@ -249,6 +253,9 @@ const App = () => {
   const [isListOpen, setIsListOpen] = useState(false); 
   // *** 追蹤模式狀態: 'none'(自由), 'center'(鎖定), 'compass'(導航) ***
   const [followMode, setFollowMode] = useState('none'); 
+  
+  // 強制置中狀態 (保留供按鈕使用)
+  const [isRecenterForced, setIsRecenterForced] = useState(false);
 
   const watchIdRef = useRef(null); 
   const mapControlRef = useRef(null); 
@@ -290,6 +297,7 @@ const App = () => {
   const handleRecenter = () => {
     if (userLocation) {
         setFollowMode('center');
+        setIsRecenterForced(true); // 輔助狀態
         setSelectedStore(null); 
         if (mapControlRef.current && mapControlRef.current.flyTo) {
             mapControlRef.current.flyTo(userLocation.lat, userLocation.lng, DEFAULT_STATIC_ZOOM);
@@ -300,17 +308,20 @@ const App = () => {
   const handleCityChange = (e) => {
     setFilterCity(e.target.value);
     setFilterArea('');
-    setFollowMode('none'); // 切換區域時自動改為自由模式
+    setFollowMode('none');
+    setIsRecenterForced(false);
   };
 
   const handleAreaChange = (e) => {
     setFilterArea(e.target.value);
     setFollowMode('none');
+    setIsRecenterForced(false);
   };
 
   const handleStoreSelect = (store) => {
       setSelectedStore(store);
-      setFollowMode('none'); // 點擊店家時改為自由模式
+      setFollowMode('none');
+      setIsRecenterForced(false);
   };
 
   const findLocationBasedOnStores = useCallback((location) => {
@@ -339,17 +350,17 @@ const App = () => {
     }
 
     setFilterCity(''); setFilterArea(''); setSelectedStore(null); setIsWatching(true); setError(''); 
-    setFollowMode('center'); 
+    setFollowMode('center'); setIsRecenterForced(true);
 
     watchIdRef.current = navigator.geolocation.watchPosition(
         (pos) => {
             setUserLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-            if (pos.coords.heading) setUserHeading(pos.coords.heading);
+            if (pos.coords.heading && !isNaN(pos.coords.heading)) setUserHeading(pos.coords.heading);
         },
         (err) => {
             console.error(err);
             if (watchIdRef.current) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
-            setIsWatching(false); setFollowMode('none');
+            setIsWatching(false); setFollowMode('none'); setIsRecenterForced(false);
             setFilterCity(DEFAULT_CITY); setFilterArea(DEFAULT_AREA);
         },
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
@@ -363,7 +374,8 @@ const App = () => {
       setFilterCity(city); setFilterArea(area);
       setSelectedStore(null);
       
-      if (userLocation) setFollowMode('center'); else setFollowMode('none');
+      if (userLocation) { setFollowMode('center'); setIsRecenterForced(true); } 
+      else { setFollowMode('none'); setIsRecenterForced(false); }
       
   }, [findLocationBasedOnStores, userLocation]); 
 
@@ -379,12 +391,12 @@ const App = () => {
             (position) => {
                 const loc = { lat: position.coords.latitude, lng: position.coords.longitude };
                 setUserLocation(loc);
-                if (position.coords.heading) setUserHeading(position.coords.heading);
+                if (position.coords.heading && !isNaN(position.coords.heading)) setUserHeading(position.coords.heading);
 
                 if (!isWatching && allStores.length > 0) {
                     const { city, area } = findLocationBasedOnStores(loc);
                     setFilterCity(city); setFilterArea(area);
-                    setFollowMode('center'); 
+                    setFollowMode('center'); setIsRecenterForced(true);
                 }
             },
             (err) => console.warn("Initial geo failed:", err),
@@ -432,6 +444,7 @@ const App = () => {
   }, [followMode]);
 
   const mapCenter = useMemo(() => {
+      if (isRecenterForced && userLocation) return { lat: userLocation.lat, lng: userLocation.lng, zoom: 17 };
       if ((followMode === 'center' || followMode === 'compass') && userLocation) return { lat: userLocation.lat, lng: userLocation.lng, zoom: followMode === 'compass' ? MAX_ZOOM : 17 };
       if (selectedStore) return { lat: selectedStore.lat, lng: selectedStore.lng, zoom: MAX_ZOOM };
       if (filteredStores.length > 0) {
@@ -441,7 +454,7 @@ const App = () => {
       }
       if (userLocation) return { lat: userLocation.lat, lng: userLocation.lng, zoom: 17 };
       return { lat: DEFAULT_STATIC_LAT, lng: DEFAULT_STATIC_LNG, zoom: DEFAULT_STATIC_ZOOM };
-  }, [userLocation, followMode, filteredStores, selectedStore]); 
+  }, [userLocation, followMode, filteredStores, selectedStore, isRecenterForced]); 
 
   return (
     <div className="flex flex-col h-[100dvh] bg-gray-50 font-sans overflow-hidden">
@@ -455,7 +468,7 @@ const App = () => {
                 isWatching={isWatching}
                 stores={filteredStores}
                 selectedStore={selectedStore}
-                onStoreSelect={(s) => { setSelectedStore(s); setFollowMode('none'); }}
+                onStoreSelect={handleStoreSelect} 
                 proximityRadius={proximityRadius} 
                 mapControlRef={mapControlRef}
                 followMode={followMode}
@@ -463,7 +476,7 @@ const App = () => {
             />
             <div className="absolute bottom-4 right-4 z-[1000] flex flex-col gap-2">
                 {userLocation && (
-                    <button onClick={handleRecenter} className={`p-3 rounded-full shadow-xl transition-all flex justify-center items-center border-2 ${followMode !== 'none' ? 'bg-blue-100 text-blue-700 border-2 border-blue-500' : 'bg-white text-blue-600 hover:bg-gray-100'}`} title="置中到我的位置">
+                    <button onClick={handleRecenter} className={`p-3 rounded-full shadow-xl transition-all flex justify-center items-center border-2 ${isRecenterForced ? 'bg-blue-100 text-blue-700 border-2 border-blue-500' : 'bg-white text-blue-600 hover:bg-gray-100'}`} title="置中到我的位置">
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064" /><circle cx="12" cy="12" r="3" /></svg>
                     </button>
                 )}
