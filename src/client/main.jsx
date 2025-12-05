@@ -183,7 +183,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     // 使用者圖標生成器 (顏色增強：深藍與深灰)
     const createUserIcon = (size = 30, heading, isTracking) => {
         // 箭頭形狀 SVG
-        // *** 顏色調整：使用更鮮豔的 #0044FF (深藍) 和 #555555 (深灰) ***
+        // 顏色調整：使用更鮮豔的 #0044FF (深藍) 和 #555555 (深灰)
         const arrowColor = isTracking ? '#0044FF' : '#555555';
         const arrowSvg = `
             <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="${arrowColor}" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -191,8 +191,10 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
             </svg>
         `;
         
+        // 根據 heading 旋轉箭頭
+        // *** 修正：將角度 + 180 度，解決方向相反的問題 ***
         const rotationStyle = (heading !== null && heading !== undefined)
-            ? `transform: rotate(${heading}deg);` 
+            ? `transform: rotate(${heading + 180}deg);` 
             : ''; 
 
         // 靜態模式下的發光 class
@@ -210,7 +212,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
                 border-radius: 50%; 
                 box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5); 
                 border: 3px solid ${arrowColor}; /* 加粗邊框 */
-                transition: transform 0.1s linear; /* 更平滑的轉動 */
+                transition: transform 0.1s linear;
             ">
                 <div style="
                     width: ${size}px; 
@@ -242,6 +244,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
         // 建立 Popup 內容
         let popupContent = `<b>🚶 您的位置</b>`;
         if (userHeading !== null && userHeading !== undefined) {
+            // 顯示修正後的角度以便除錯，或者只顯示方向
             popupContent += `<br/>方向: ${userHeading.toFixed(0)}°`;
         }
         if (!isWatching) {
@@ -262,9 +265,9 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
             const radiusInMeters = proximityRadius * 1000;
             if (!userCircleRef.current) {
                 userCircleRef.current = L.circle(latLng, {
-                    color: '#0044FF', // *** 顏色加深 ***
+                    color: '#0044FF', 
                     fillColor: '#0044FF',
-                    fillOpacity: 0.15, // 稍微增加不透明度
+                    fillOpacity: 0.15, 
                     radius: radiusInMeters,
                     weight: 2,
                     interactive: false,
@@ -305,7 +308,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
           distanceHtml = `<span class="text-green-600 font-bold">${value} ${unit}</span><br/>`;
       }
 
-      // *** 顏色調整 ***
+      // 顏色調整
       const iconColor = isSelected ? '#FFAA00' : '#FF0000'; // 選中:深金黃, 未選中:正紅
       const iconText = isSelected ? '' : store.name; 
       
@@ -515,8 +518,8 @@ const App = () => {
           watchIdRef.current = null;
       }
       
-      // 停止監聽方向
-      window.removeEventListener('deviceorientation', handleOrientation);
+      // *** 修正：在靜態模式下不移除 deviceorientation 監聽，以便繼續顯示羅盤 ***
+      // window.removeEventListener('deviceorientation', handleOrientation);
       
       setIsWatching(false);
 
@@ -528,14 +531,15 @@ const App = () => {
       // 保留 userLocation 以便靜態模式顯示
       setSelectedStore(null);
       
-      // 修正重點：停止追蹤時，如果還找得到 userLocation，強制置中，不讓地圖跳到區域中心
+      // 停止追蹤時，如果還找得到 userLocation，強制置中，不讓地圖跳到區域中心
       if (userLocation) {
           setIsRecenterForced(true);
       } else {
           setIsRecenterForced(false);
       }
       
-      setUserHeading(null); 
+      // 不重置 userHeading，保持羅盤顯示
+      // setUserHeading(null); 
   }, [findLocationBasedOnStores, userLocation, handleOrientation]); 
 
   // 4. 組件掛載時獲取一次位置 (靜態模式也需要位置)
@@ -567,6 +571,9 @@ const App = () => {
             { enableHighAccuracy: true, timeout: 5000 }
         );
     }
+    
+    // *** 在組件掛載時也嘗試啟用 deviceorientation 監聽 (針對非需要權限的設備) ***
+    window.addEventListener('deviceorientation', handleOrientation);
     
     // Cleanup on unmount
     return () => {
