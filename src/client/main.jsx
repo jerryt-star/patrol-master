@@ -53,7 +53,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
   const userCircleRef = useRef(null); 
   const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
   
-  // 暴露給父元件呼叫的方法
+  // 暴露給父元件呼叫的方法：強制地圖重新計算尺寸
   const forceMapResize = useCallback(() => {
     if (mapInstanceRef.current && window.L) {
         window.requestAnimationFrame(() => {
@@ -63,18 +63,10 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     }
   }, []);
 
-  // 1. 將方法綁定到傳入的 ref
+  // 1. 將 forceMapResize 綁定到傳入的 ref
   useEffect(() => {
       if (mapControlRef) {
-          mapControlRef.current = { 
-              forceMapResize,
-              // 新增 flyTo 方法供外部直接調用
-              flyTo: (lat, lng, z) => {
-                  if (mapInstanceRef.current) {
-                      mapInstanceRef.current.flyTo([lat, lng], z);
-                  }
-              }
-          };
+          mapControlRef.current = { forceMapResize };
       }
   }, [mapControlRef, forceMapResize]); 
 
@@ -145,7 +137,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLeafletLoaded]); 
 
-  // 4. 視圖控制 (flyTo) - 這是 React 狀態驅動的移動
+  // 4. 視圖控制 (flyTo)
   useEffect(() => {
       if (!mapInstanceRef.current || !isLeafletLoaded) return;
       
@@ -191,6 +183,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     // 使用者圖標生成器 (顏色增強：深藍與深灰)
     const createUserIcon = (size = 30, heading, isTracking) => {
         // 箭頭形狀 SVG
+        // *** 顏色調整：使用更鮮豔的 #0044FF (深藍) 和 #555555 (深灰) ***
         const arrowColor = isTracking ? '#0044FF' : '#555555';
         const arrowSvg = `
             <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="${arrowColor}" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -217,12 +210,12 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
                 border-radius: 50%; 
                 box-shadow: 0 3px 8px rgba(0, 0, 0, 0.5); 
                 border: 3px solid ${arrowColor}; /* 加粗邊框 */
-                transition: transform 0.3s ease-out;
+                transition: transform 0.1s linear; /* 更平滑的轉動 */
             ">
                 <div style="
                     width: ${size}px; 
                     height: ${size}px; 
-                    transition: transform 0.3s ease-out; 
+                    transition: transform 0.1s linear; 
                     ${rotationStyle}
                 ">
                     ${arrowSvg}
@@ -388,6 +381,21 @@ const App = () => {
     }, 350); 
   };
 
+  // 監聽裝置方向變化
+  const handleOrientation = useCallback((event) => {
+    // iOS 通常使用 webkitCompassHeading
+    let heading = event.webkitCompassHeading;
+    
+    // Android 使用 alpha (需要進行轉換，且未必準確，視裝置而定)
+    if (!heading && event.alpha) {
+        heading = 360 - event.alpha;
+    }
+    
+    if (heading !== null && heading !== undefined) {
+        setUserHeading(heading);
+    }
+  }, []);
+
 
   // 1. 載入資料 
   useEffect(() => {
@@ -432,12 +440,27 @@ const App = () => {
   }, [allStores]);
 
   // 2. 啟動位置追蹤 
-  const startWatchingPosition = useCallback(() => {
+  const startWatchingPosition = useCallback(async () => {
     if (watchIdRef.current !== null) return;
 
     if (!navigator.geolocation) {
         setError('您的瀏覽器不支持地理位置追蹤。');
         return;
+    }
+
+    // *** 請求 iOS 13+ 電子羅盤權限 ***
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        try {
+            const permission = await DeviceOrientationEvent.requestPermission();
+            if (permission === 'granted') {
+                window.addEventListener('deviceorientation', handleOrientation);
+            }
+        } catch (e) {
+            console.error('DeviceOrientation requestPermission error:', e);
+        }
+    } else {
+        // 非 iOS 13+ 裝置，直接監聽
+        window.addEventListener('deviceorientation', handleOrientation);
     }
 
     setFilterCity(''); 
@@ -453,9 +476,10 @@ const App = () => {
         };
         setUserLocation(newLocation);
         
-        // 更新方向 (heading)
+        // 備用方案：如果 deviceorientation 不可用，嘗試使用 GPS 的 heading (僅在移動時有效)
         if (position.coords.heading !== null && !isNaN(position.coords.heading)) {
-            setUserHeading(position.coords.heading);
+            // 只有在 userHeading 尚未由 deviceorientation 設定時才使用
+            setUserHeading(prev => prev === null ? position.coords.heading : prev);
         }
     };
 
@@ -482,7 +506,7 @@ const App = () => {
         }
     );
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); 
+  }, [handleOrientation]); // 加入 handleOrientation 依賴
 
   // 3. 停止位置追蹤 
   const stopWatchingPosition = useCallback(() => {
@@ -490,6 +514,10 @@ const App = () => {
           navigator.geolocation.clearWatch(watchIdRef.current);
           watchIdRef.current = null;
       }
+      
+      // 停止監聽方向
+      window.removeEventListener('deviceorientation', handleOrientation);
+      
       setIsWatching(false);
 
       const { city, area } = findLocationBasedOnStores(userLocation);
@@ -508,7 +536,7 @@ const App = () => {
       }
       
       setUserHeading(null); 
-  }, [findLocationBasedOnStores, userLocation]); 
+  }, [findLocationBasedOnStores, userLocation, handleOrientation]); 
 
   // 4. 組件掛載時獲取一次位置 (靜態模式也需要位置)
   useEffect(() => {
@@ -539,8 +567,18 @@ const App = () => {
             { enableHighAccuracy: true, timeout: 5000 }
         );
     }
+    
+    // Cleanup on unmount
+    return () => {
+         window.removeEventListener('deviceorientation', handleOrientation);
+         if (watchIdRef.current !== null) {
+            navigator.geolocation.clearWatch(watchIdRef.current);
+         }
+    };
+
+  // 依賴於 allStores 確保資料集可用於 findNearestStoreLocation
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allStores]); 
+  }, [allStores, handleOrientation]); 
 
   // 5. 核心篩選與排序邏輯 
   useEffect(() => {
@@ -575,7 +613,7 @@ const App = () => {
       return [...new Set(allStores.filter(s => s.city === filterCity).map(s => s.area))].filter(Boolean).sort();
   }, [allStores, filterCity]);
 
-  // *** 手動置中處理 (修正：強制調用地圖方法) ***
+  // *** 手動置中處理 ***
   const handleRecenter = () => {
       if (userLocation) {
           setIsRecenterForced(true);
@@ -610,7 +648,7 @@ const App = () => {
   const mapCenter = useMemo(() => {
       // 1. 強制置中 (按鈕 / 初始載入 / 停止追蹤瞬間) - 最高優先級
       if (isRecenterForced && userLocation) {
-          return { lat: userLocation.lat, lng: userLocation.lng, zoom: DEFAULT_STATIC_ZOOM }; // 使用 17
+          return { lat: userLocation.lat, lng: userLocation.lng, zoom: 17 };
       }
 
       // 2. 選中店家
@@ -678,7 +716,7 @@ const App = () => {
             />
             
             {/* 浮動控制面板 (定位按鈕) - 位於右下角 */}
-            <div className="absolute bottom-8 right-4 z-[1000] flex flex-col gap-2">
+            <div className="absolute bottom-4 right-4 z-[1000] flex flex-col gap-2">
                 {/* 置中按鈕 (僅在有使用者位置時顯示) */}
                 {userLocation && (
                     <button 
