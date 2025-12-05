@@ -53,7 +53,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
   const userCircleRef = useRef(null); 
   const [isLeafletLoaded, setIsLeafletLoaded] = useState(false);
   
-  // 暴露給父元件呼叫的方法：強制地圖重新計算尺寸
+  // 暴露給父元件呼叫的方法
   const forceMapResize = useCallback(() => {
     if (mapInstanceRef.current && window.L) {
         window.requestAnimationFrame(() => {
@@ -63,10 +63,18 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     }
   }, []);
 
-  // 1. 將 forceMapResize 綁定到傳入的 ref
+  // 1. 將方法綁定到傳入的 ref
   useEffect(() => {
       if (mapControlRef) {
-          mapControlRef.current = { forceMapResize };
+          mapControlRef.current = { 
+              forceMapResize,
+              // 新增 flyTo 方法供外部直接調用
+              flyTo: (lat, lng, z) => {
+                  if (mapInstanceRef.current) {
+                      mapInstanceRef.current.flyTo([lat, lng], z);
+                  }
+              }
+          };
       }
   }, [mapControlRef, forceMapResize]); 
 
@@ -137,7 +145,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLeafletLoaded]); 
 
-  // 4. 視圖控制 (flyTo)
+  // 4. 視圖控制 (flyTo) - 這是 React 狀態驅動的移動
   useEffect(() => {
       if (!mapInstanceRef.current || !isLeafletLoaded) return;
       
@@ -183,7 +191,6 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     // 使用者圖標生成器 (顏色增強：深藍與深灰)
     const createUserIcon = (size = 30, heading, isTracking) => {
         // 箭頭形狀 SVG
-        // *** 顏色調整：使用更鮮豔的 #0044FF (深藍) 和 #555555 (深灰) ***
         const arrowColor = isTracking ? '#0044FF' : '#555555';
         const arrowSvg = `
             <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="${arrowColor}" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -568,11 +575,16 @@ const App = () => {
       return [...new Set(allStores.filter(s => s.city === filterCity).map(s => s.area))].filter(Boolean).sort();
   }, [allStores, filterCity]);
 
-  // *** 手動置中處理 ***
+  // *** 手動置中處理 (修正：強制調用地圖方法) ***
   const handleRecenter = () => {
       if (userLocation) {
           setIsRecenterForced(true);
           setSelectedStore(null); 
+          
+          // 強制 Leaflet 執行 flyTo，確保即使狀態判斷無變化也會執行
+          if (mapControlRef.current && mapControlRef.current.flyTo) {
+              mapControlRef.current.flyTo(userLocation.lat, userLocation.lng, DEFAULT_STATIC_ZOOM);
+          }
       }
   };
 
@@ -598,7 +610,7 @@ const App = () => {
   const mapCenter = useMemo(() => {
       // 1. 強制置中 (按鈕 / 初始載入 / 停止追蹤瞬間) - 最高優先級
       if (isRecenterForced && userLocation) {
-          return { lat: userLocation.lat, lng: userLocation.lng, zoom: DEFAULT_STATIC_ZOOM };
+          return { lat: userLocation.lat, lng: userLocation.lng, zoom: DEFAULT_STATIC_ZOOM }; // 使用 17
       }
 
       // 2. 選中店家
@@ -665,7 +677,7 @@ const App = () => {
                 mapControlRef={mapControlRef} 
             />
             
-            {/* 浮動控制面板 (定位按鈕) - 位於右下角，位置稍微調高確保不被列表遮擋 */}
+            {/* 浮動控制面板 (定位按鈕) - 位於右下角 */}
             <div className="absolute bottom-8 right-4 z-[1000] flex flex-col gap-2">
                 {/* 置中按鈕 (僅在有使用者位置時顯示) */}
                 {userLocation && (
