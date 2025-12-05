@@ -88,7 +88,7 @@ const LeafletMap = ({ centerLat, centerLng, zoom, userLocation, stores, selected
     script.onload = () => setIsLeafletLoaded(true);
     document.body.appendChild(script);
 
-    // 添加自定義 CSS (動畫) - *** 顏色調整：加深發光效果的藍色 ***
+    // 添加自定義 CSS (動畫)
     const style = document.createElement('style');
     style.innerHTML = `
         @keyframes bobbing {
@@ -598,7 +598,7 @@ const App = () => {
   const mapCenter = useMemo(() => {
       // 1. 強制置中 (按鈕 / 初始載入 / 停止追蹤瞬間) - 最高優先級
       if (isRecenterForced && userLocation) {
-          return { lat: userLocation.lat, lng: userLocation.lng, zoom: DEFAULT_STATIC_ZOOM }; // 使用 17
+          return { lat: userLocation.lat, lng: userLocation.lng, zoom: DEFAULT_STATIC_ZOOM };
       }
 
       // 2. 選中店家
@@ -647,10 +647,10 @@ const App = () => {
   }, [userLocation, isWatching, filteredStores, selectedStore, isRecenterForced]); 
 
   return (
-    // 根容器：使用 h-screen 配合 flex-col
-    <div className="flex flex-col h-screen bg-gray-50 font-sans">
+    // 根容器：使用 h-[100dvh] 解決手機瀏覽器網址列遮擋問題
+    <div className="flex flex-col h-[100dvh] bg-gray-50 font-sans overflow-hidden">
         {/* 地圖區：使用 flex-grow 佔滿所有剩餘空間 */}
-        <div className="flex-grow relative z-0 shadow-lg">
+        <div className="flex-grow relative z-0 shadow-lg min-h-0">
             <LeafletMap 
                 centerLat={mapCenter.lat}
                 centerLng={mapCenter.lng}
@@ -665,8 +665,8 @@ const App = () => {
                 mapControlRef={mapControlRef} 
             />
             
-            {/* 浮動控制面板 (定位按鈕) - 位於右下角 */}
-            <div className="absolute bottom-4 right-4 z-[1000] flex flex-col gap-2">
+            {/* 浮動控制面板 (定位按鈕) - 位於右下角，位置稍微調高確保不被列表遮擋 */}
+            <div className="absolute bottom-8 right-4 z-[1000] flex flex-col gap-2">
                 {/* 置中按鈕 (僅在有使用者位置時顯示) */}
                 {userLocation && (
                     <button 
